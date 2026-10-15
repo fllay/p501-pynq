@@ -1,0 +1,410 @@
+/include/ "system-conf.dtsi"
+
+/* ROOT CAUSE FOUND (RX-never-works bug): the inherited zcu102/fmcomms2-3 reference
+ * tree's "uart1-default" pinctrl group (groups=uart1_5_grp) muxes MIO20/MIO21 to the
+ * uart1 function -- that's the ZCU102's own wiring, not ours. Our actual UART1 pins,
+ * per Vivado's PS8 config (psu_init.c) and confirmed working at the U-Boot prompt,
+ * are MIO40 (TX) / MIO41 (RX). FSBL leaves MIO20/21 inert (L3_SEL=0, gpio) at boot;
+ * it's Linux's pinctrl driver applying this stale "default" state on UART1 probe that
+ * first actively muxes MIO21 to uart1 RX too. Since a ZynqMP peripheral's RX input is
+ * an OR of every MIO pin currently muxed to it, and MIO21 floats unconnected on this
+ * board, this corrupts the shared internal UART1 RX line -- explaining why RX is 100%
+ * dead under Linux (SR.RXEMPTY stuck at 1, zero RXTRIG interrupts ever, confirmed via
+ * raw register polling while mashing keys) while TX and U-Boot's own RX are both fine.
+ * Drop the stale pinctrl reference entirely so Linux leaves MIO20/21 untouched. */
+&{/axi/serial@ff010000} {
+	/delete-property/ pinctrl-names;
+	/delete-property/ pinctrl-0;
+};
+
+/* PYNQ BUILD NOTE: PYNQ's hardware auto-detection (CONFIG_SUBSYSTEM_PRIMARY_SD)
+ * picked PSU_SD_0 (mmc@ff160000) as primary, and this build's generated tree
+ * leaves BOTH mmc@ff160000 (SD0) and mmc@ff170000 (SD1) enabled. This board's
+ * real, physically-wired SD card slot is SD1 (MIO43-51, confirmed in the
+ * official user manual's boot-mode table -- "SD1 CARD" -- and this project's
+ * own board_context notes) -- SD0 isn't real hardware here. With both
+ * controllers enabled, Linux's mmcblk numbering doesn't necessarily match
+ * U-Boot's own (U-Boot read BOOT.BIN/image.ub/boot.scr fine), so
+ * root=/dev/mmcblk0p2 can end up pointing at the unpopulated SD0 instead of
+ * the real card -- "VFS: Unable to mount root fs on unknown-block(179,2)".
+ * Disabling SD0 makes SD1 the only (and therefore first, mmcblk0) MMC
+ * device, matching what root=/dev/mmcblk0p2 expects. */
+&{/axi/mmc@ff160000} {
+	status = "disabled";
+};
+
+/* PYNQ BUILD NOTE, REVISED: originally enabled PYNQ's auto-generated
+ * (normally disabled) PS pinctrl controller here to mux SD1's pins,
+ * believing "mmc0: error -110 whilst initialising SD card" meant the MIO
+ * pins weren't muxed to sdio1. That was wrong. JTAG confirmed enabling
+ * this controller deadlocks all 4 Cortex-A53 cores (identical PC, spinning
+ * on one contended lock, IRQs masked) right around cpufreq_online/
+ * cpufreq-dt -- both tried with and without the conf (slew-rate/power-
+ * source/bias/drive-strength) sub-node, no difference, so it's the PM/IPI
+ * pinctrl call itself, not a specific request. Checked p501_iio's own
+ * FSBL config (psu_init.c): it already writes
+ * PSU_IOU_SLCR_MIO_PIN_46_L2_SEL = 2 (sd1) directly via PSU_Mask_Write --
+ * the exact same mechanism that makes UART1/Ethernet work with no Linux
+ * pinctrl involvement at all. The MIO pins are correctly muxed before
+ * Linux even starts; Linux's pinctrl subsystem was never needed here, and
+ * enabling it only introduced this PMU-firmware deadlock. Left disabled. */
+
+&{/axi/mmc@ff170000} {
+	/* These two are read directly by the sdhci-arasan driver itself, no
+	 * PM/firmware call involved -- real hardware facts (TXS02612RTWR
+	 * level shifter can't do UHS 1.8V signaling; no write-protect pin
+	 * wired per the manual's SD table), safe to keep. */
+	no-1-8-v;
+	disable-wp;
+};
+
+/* PYNQ BUILD NOTE: the upstream p501_iio project sets `dma-coherent` on the RX
+ * DMA node (&{/fpga-axi@0/dma@9c400000}, ~3.7x capture throughput -- see that
+ * project's README) directly in the combined boot-time device tree. Under
+ * PYNQ's overlay-based build (CONFIG_SUBSYSTEM_DTB_OVERLAY=y), the PL/fpga-axi
+ * subtree doesn't exist yet when this base system-top.dtb is compiled -- it's
+ * only materialized later, in the separate PL overlay generated from the .hwh
+ * and applied at runtime when a bitstream is loaded. dtc fails with "Label or
+ * path /fpga-axi@0/dma@9c400000 not found" if this override stays here, so
+ * it's dropped for this build. The coherent-DMA property itself is unaffected
+ * on real hardware either way (it's a Vivado/HPC0-port wiring fact, not
+ * something this dtsi line creates) -- what's lost is only the Linux-side
+ * `dma-coherent` DT hint, meaning PYNQ users get the pre-fix ~59MB/s capture
+ * path until this is re-added to the PL overlay template specifically
+ * (follow-up, not yet done). */
+
+/ {
+	chosen {
+		/* P501 only clocks PS UART1 (see psu_init.c: UART1_REF_CTRL CLKACT=1,
+		 * no UART0 clock enable at all) -- the stock zcu102 reference .dts
+		 * defaults to UART0 (serial0/ttyPS0), which is unclocked on this
+		 * board and produces no output. Override to UART1 to match hardware. */
+		/* PYNQ BUILD NOTE: upstream p501_iio points stdout-path at the alias
+		 * "serial1", which resolves to the real UART1 silicon there. In this
+		 * PYNQ build the generated aliases table instead maps serial0 -> the
+		 * real /axi/serial@ff010000 and serial1 -> /dcc (JTAG Debug
+		 * Communications Channel, not a physical UART) -- U-Boot silently
+		 * hangs trying to use it with no debugger attached (zero output after
+		 * the BL31 banner). Using the absolute node path instead of an alias
+		 * sidesteps this build's different alias ordering entirely. */
+		stdout-path = "/axi/serial@ff010000:115200n8";
+		/* Silent hang persists at the EXACT same point (right after cpufreq-dt's probe,
+		 * which now fails gracefully thanks to cpufreq.off=1) no matter what peripheral
+		 * driver is enabled/disabled -- tested i2c-mux, UART0, SD, SPIx2, USB, ethernet,
+		 * both I2C buses, CAN, GPU, GPIO, PCIe, SERDES PHY, RTC, AHCI, watchdog, AMS,
+		 * display, all 8 DMA channels, zynqmp-aes, EDAC_ZYNQMP_OCM -- all zero effect.
+		 * This consistency points away from any specific peripheral driver and toward a
+		 * late_initcall that runs unconditionally: clk_disable_unused() walks every
+		 * registered clock and disables unused ones; if a PS8 clock's disable call goes
+		 * through the PMU firmware via IPI and hangs (a different specific IPI call than
+		 * the one cpufreq.off=1 bypasses), it would hang exactly here regardless of which
+		 * drivers are present. clk_ignore_unused skips that pass entirely -- testing. */
+		/* Diagnostic rdinit=/diag.sh (raw register polling) and init=/bin/sh are no
+		 * longer needed -- root cause of the RX-dead bug found and fixed above (stale
+		 * uart1 pinctrl group). Back to normal systemd boot for a real login test. */
+		bootargs = "earlycon console=ttyPS1,115200 root=/dev/ram0 rw cpufreq.off=1 clk_ignore_unused";
+	};
+
+	/* ROOT CAUSE FOUND: the base device tree's /memory@0 node declares
+	 * reg = <0x0 0x0 0x0 0x80000000 0x8 0x0 0x0 0x80000000> -- TWO 2GiB regions: the real
+	 * one at 0x0, and a PHANTOM second 2GiB region at 0x800000000 (ZynqMP's "high DDR"
+	 * address, the 32GiB offset). This exactly matches u-boot's "DRAM: 2 GiB (effective
+	 * 4 GiB)" -- the board only has 2GiB physically populated, but the device tree claims
+	 * 4GiB. Any kernel subsystem sizing itself off the declared total (swiotlb, CMA
+	 * auto-placement, etc.) can end up touching the phantom upper region, which isn't
+	 * backed by real DRAM -- causing the translation faults and kernel .text corruption
+	 * we've been chasing. Confirmed by removing our CMA override: a DIFFERENT, EARLIER
+	 * crash appeared (swiotlb_init_remap -> __memset -> translation fault), consistent
+	 * with memory-sizing confusion, not a CMA-placement bug specifically.
+	 * Fix: declare only the real, populated 2GiB. */
+	memory@0 {
+		device_type = "memory";
+		reg = <0x0 0x0 0x0 0x80000000>;
+	};
+
+	reserved-memory {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+		linux,cma {
+			compatible = "shared-dma-pool";
+			reusable;
+			size = <0x0 0x10000000>;
+			alignment = <0x0 0x2000>;
+			linux,cma-default;
+		};
+	};
+
+	/* ROOT CAUSE FOUND (USB3 PHY never probes, fully silent): the inherited
+	 * zcu102/fmcomms2-3 reference tree wires the PS-GTR SerDes block's ref0-ref3
+	 * clocks to a "silabs,si5341" clock synthesizer -- the SAME inherited FMC
+	 * mezzanine clock-generator chip (behind i2c-mux@74) already confirmed absent
+	 * on this board. clk_get("ref0") therefore never resolves, so xilinx-psgtr sits
+	 * in permanent, silent deferred probe ("Failed to get ref clock 0" in
+	 * /sys/kernel/debug/devices_deferred) -- which in turn strands dwc3/USB3,
+	 * which depends on this PHY. Fix: Vivado's own PS8 config already records the
+	 * real on-board oscillator for the lane USB3 actually uses
+	 * (PSU__USB0__REF_CLK_SEL = Ref Clk2, PSU__USB0__REF_CLK_FREQ = 26 MHz) --
+	 * model that as a plain fixed-clock and point the PHY at it instead. */
+	gtr_ref_clk: gtr_ref_clk {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <26000000>;
+	};
+};
+
+&{/axi/phy@fd400000} {
+	clocks = <&gtr_ref_clk>, <&gtr_ref_clk>, <&gtr_ref_clk>, <&gtr_ref_clk>;
+	clock-names = "ref0", "ref1", "ref2", "ref3";
+};
+
+/* ETHERNET ROOT CAUSE FOUND (2026-10-12): the inherited zcu102/fmcomms2-3 reference
+ * tree's "ethernet0" alias / default-enabled node addresses GEM3 (ff0e0000), but
+ * Vivado's PS8 config never actually enables GEM3 at all (PSU__ENET3__PERIPHERAL__
+ * ENABLE=0) -- it's GEM1 (ff0c0000, PSU__ENET1__PERIPHERAL__ENABLE=1, routed via
+ * EMIO through the PL fabric, PHY_AD[2:0]=001 per the official P401/P501 user
+ * manual's Gigabit Ethernet section) that's real. The PL-side RGMII datapath itself
+ * was also never wired in the Vivado block design -- fixed separately by
+ * instantiating/wiring the xilinx.com:ip:gmii_to_rgmii IP between PS8's EMIO ENET1
+ * GMII signals and the board's real RGMII pins (already correctly constrained in
+ * the XDC by the pins in the manual, just never connected to any logic). GEM3
+ * (ff0e0000) stays disabled -- it was never real hardware on this board. */
+&{/axi/ethernet@ff0c0000} {
+	status = "okay";
+	/* PHY is a Realtek RTL8211FI-CG (U28, schematic sheet 17). PHYRSTB is a
+	 * plain RC power-on-reset (R243+C296 to VDD_3V3), not GPIO-controlled, so
+	 * no reset-gpios property is needed.
+	 *
+	 * phy-mode history: link trained up fine at "rgmii-rxid" (1Gbps/Full
+	 * reported), but NO actual traffic ever got through -- not even a DHCP
+	 * response from a real router. Root cause, confirmed directly in the
+	 * kernel's rtl8211f_config_rgmii_delay() (drivers/net/phy/realtek/
+	 * realtek_main.c): this function WRITES the PHY's TX/RX delay-enable
+	 * registers based on phy-mode, unconditionally overriding whatever the
+	 * RX_DELAY/TX_DELAY strap resistors (R236/R237, both unpopulated/NC on
+	 * this board) would otherwise default to. "rgmii-rxid" makes it write
+	 * val_txdly=0 (TX delay forced OFF). Our gmii_to_rgmii IP also has
+	 * RGMII_TXC_SKEW=0 (no delay on the FPGA/MAC side) -- so with "rgmii-rxid"
+	 * NEITHER end was compensating clock-to-data skew for the MAC-to-PHY (TX)
+	 * direction at all, corrupting frames in transit despite link training
+	 * (a simpler, more tolerant process) succeeding. "rgmii-id" makes the
+	 * driver enable delay on BOTH tx and rx in the PHY's own registers,
+	 * fixing this without touching the FPGA bitstream. */
+	phy-mode = "rgmii-id";
+	phy-handle = <&ethernet_phy1>;
+
+	/* MDIO ROOT CAUSE CONFIRMED AND FIXED (2026-10-12): the gmii_to_rgmii
+	 * bridge IP's mdio_gem_* / mdio_phy_* pass-through ports (an optional
+	 * convenience for the IP's own internal link-speed auto-detection, not a
+	 * requirement for basic MDIO function) were silently breaking every MDIO
+	 * transaction -- the bus was never actually reaching U28. Fixed in the
+	 * Vivado block design by disconnecting MDIO from the bridge entirely and
+	 * wiring PS8's EMIO ENET1 MDIO signals straight to the top-level
+	 * MDIO_PHY_* ports instead (see P501_IIO project, gmii_to_rgmii_0 is no
+	 * longer in the MDIO path at all -- only the GMII/RGMII *data* path still
+	 * goes through it, which was always fine). Confirmed via direct
+	 * devmem-based MACB_MAN register reads (PHY addr 1, regs 2/3) returning
+	 * PHYID1=0x001C/PHYID2=0xC916 -- the real RTL8211F -- both before AND
+	 * after this fix, proving the hardware was always fine and the bridge's
+	 * MDIO pass-through was the actual blocker. Confirmed end-to-end on real
+	 * hardware: RTL8211F driver binds, phy_id=0x001cc916, "Link is Up -
+	 * 1Gbps/Full". */
+	#address-cells = <1>;
+	#size-cells = <0>;
+	mdio {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		/* PYNQ BUILD NOTE: Vivado's device-tree-generator, run under PYNQ's
+		 * overlay/symbol flags (-@, CONFIG_SUBSYSTEM_DTB_OVERLAY=y), auto-emits
+		 * `phy-handle = <&phy1>;` on both &gem1 and the gmii_to_rgmii_0 node in
+		 * the generated pcw.dtsi -- a label name this project's own dtsi never
+		 * defines (it uses ethernet_phy1). Added as a second label on the same
+		 * node rather than renaming the upstream one, so dtc can resolve it. */
+		/* PYNQ BUILD NOTE: with no "compatible" string, fwnode_get_phy_id()
+		 * has nothing to parse, falling through to generic MDIO ID-register
+		 * probing in get_phy_device() -- which appears to mis-detect this
+		 * PHY as Clause 45, forcing phylink_bringup_phy() to validate with
+		 * config.interface = PHY_INTERFACE_MODE_NA (prints as an empty
+		 * string -- "validation of  with support ... failed: -EINVAL",
+		 * exactly what showed up in dmesg) instead of rgmii-id, so phylink
+		 * finds zero compatible link modes. Explicit ID-based compatible
+		 * string (RTL8211F PHYID1=0x001C/PHYID2=0xC916, independently
+		 * confirmed via direct devmem MACB_MAN register reads in this
+		 * project's original debugging) makes fwnode_get_phy_id() succeed
+		 * and skips get_phy_device() (and its c45 guess) entirely, via
+		 * phy_device_create() instead. */
+		phy1: ethernet_phy1: ethernet-phy@1 {
+			compatible = "ethernet-phy-id001c.c916";
+			reg = <1>;
+		};
+	};
+};
+
+/* PYNQ BUILD NOTE: Vivado's device-tree-generator also auto-inserts a
+ * "gmii_to_rgmii_0@1" pseudo-device on this same mdio bus (it models the
+ * IP's theoretical MDIO pass-through capability from its catalog
+ * metadata), at reg = <1> -- the EXACT same MDIO address as the real
+ * RTL8211F PHY (ethernet_phy1 above), since both nodes are named "mdio"
+ * under the same &{/axi/ethernet@ff0c0000} parent and get merged. The
+ * generator has no way to know this project's Vivado block design
+ * removed gmii_to_rgmii from the MDIO path entirely (see the MDIO ROOT
+ * CAUSE note above) -- this auto-inserted node is simply wrong for this
+ * bitstream and collides with the real PHY's address, almost certainly
+ * why "Couldn't find phydev" / macb probe error -16 happened at boot.
+ * Delete it so only the real PHY claims address 1. */
+&psu_ethernet_1_mdio {
+	/delete-node/ gmii_to_rgmii_0@1;
+};
+
+/* GEM3 was never enabled in Vivado's PS8 config (PSU__ENET3__PERIPHERAL__ENABLE=0)
+ * -- not real hardware on this board. The inherited reference tree defaults it to
+ * enabled, so it probes and harmlessly fails (PM domain request correctly refused
+ * by firmware). Disable explicitly instead of leaving it implicit. */
+&{/axi/ethernet@ff0e0000} {
+	status = "disabled";
+};
+
+/* USB3 port (J7, Type-A) is confirmed dual-role capable in hardware (USB3320C-EZK
+ * ULPI PHY's CPEN pin drives a VBUS power switch, the standard OTG application
+ * circuit for this chip -- see user manual 2.12 "configurable as either Host or
+ * Device mode"). But there's no ID pin, extcon, or usb-role-switch wired on this
+ * board (confirmed live: /sys/class/usb_role/ is empty, /sys/class/udc/ doesn't
+ * exist at all while dr_mode="otg" defaults to host-only at boot with no runtime
+ * switch available) -- so "configurable" means a build-time choice, not a live
+ * toggle. Switching to "peripheral" here to bring up the libiio USB FunctionFS
+ * gadget (PlutoSDR-style IIO-over-USB, see usb-gadget-iio recipe) -- this trades
+ * away host-mode (USB flash drives/dongles) in this build. */
+&{/axi/usb@ff9d0000/usb@fe200000} {
+	dr_mode = "peripheral";
+};
+
+/* PYNQ BUILD NOTE: the upstream p501_iio project also disables the inherited
+ * ZCU102/FMCOMMS2-3 i2c-mux@74 child node (NXP PCA9548, almost certainly not
+ * real hardware on this board -- see that project's README/dtsi comments).
+ * Under this build's device-tree generation the i2c-mux@74 child node isn't
+ * instantiated under i2c@ff030000 at all (dtc: "Label or path
+ * /axi/i2c@ff030000/i2c-mux@74 not found"), so there's nothing to disable --
+ * dropped here. The parent controller (&{/axi/i2c@ff030000}) is still
+ * disabled below, same as upstream. */
+
+/* UART0 theory tested and ALSO had zero effect -- identical hang. Keeping disabled regardless
+ * (still correct, still unclocked), but it wasn't the cause either. */
+&{/axi/serial@ff000000} {
+	status = "disabled";
+};
+
+/* SD controller (mmc@ff170000) diagnostic-disable ALSO had zero effect -- re-enabled, we need
+ * it for real boot anyway. This ruled out my whole "specific dm-pre-reloc node" theory: every
+ * individually-testable peripheral (i2c-mux, UART0, SD) made no difference at all.
+ *
+ * RE-ENABLED (see below): SPI x2 (incl. ad9361-phy), USB, ethernet, both I2C buses, CAN, GPU,
+ * GPIO, PCIe, SERDES PHY, RTC, AHCI, watchdog, AMS, display, and all 8 DMA controllers were all
+ * individually/comprehensively tested and confirmed to have ZERO effect on the post-DRAM-fix
+ * hang -- the hang was actually root-caused separately (clk_disable_unused() walking every
+ * registered clock via a PMU-firmware IPI that hangs) and fixed via cpufreq.off=1 +
+ * clk_ignore_unused in bootargs above, which is sufficient on its own. These disables were
+ * diagnostic dead ends kept from that investigation, not an actual requirement for booting --
+ * re-enabling all of them now since we need SPI/DMA for the AD9361/IIO functionality this board
+ * exists for. If re-enabling resurfaces any hang, it was masking a real (if rare) interaction
+ * and we'll bisect again; expectation is a clean boot since the real fix is the bootarg change. */
+
+/* REGRESSION after re-enabling everything: boot hangs in U-BOOT ITSELF, right after
+ * "DRAM: 2 GiB", before PMUFW/Core/MMC ever print -- much earlier than any kernel-side hang.
+ * First guess: disabling the two "u-boot,dm-pre-reloc"-flagged nodes among what we re-enabled
+ * (spi@ff0f0000, display@fd4a0000) -- confirmed via a fresh system.dtb dump that both really are
+ * disabled in that build, and confirmed none of USB/ethernet/I2Cx2/CAN/GPU/GPIO/PCIe/PHY/RTC/
+ * AHCI/watchdog/AMS/8xDMA carry that flag either. Rebuilt and reflashed -- STILL hangs at the
+ * exact same point. So dm-pre-reloc alone doesn't explain it (or isn't the only factor).
+ * Falling back to minimal re-enable instead of further guessing: restore the full disable list
+ * that was already proven to boot cleanly to login, and re-enable ONLY spi@ff040000 (the
+ * AD9361 bus) -- the one thing actually required right now, and never tested in isolation
+ * before (always grouped with spi@ff0f0000 in earlier rounds). Bisect the rest later. */
+&{/axi/spi@ff0f0000} { status = "disabled"; };
+
+/* PYNQ AD9361 DRIVER NOTE (2026-10-14): AD9361's SPI bus is the PS's own
+ * hardware SPI0 controller (spi@ff040000, EMIO-routed -- confirmed via the
+ * block design's address map and this project's own XDC spi_clk/mosi/miso/
+ * csn constraints), not a PL-side spi_engine core. That means a plain
+ * userspace spidev node is enough for a Python driver to talk to the chip
+ * directly -- no AD9361-specific kernel driver (and so no libiio/IIO
+ * subsystem) needed at all, matching the PYNQ-side goal of register/DMA
+ * driven control. spidev's own of_match_table explicitly refuses to bind to
+ * a literal `compatible = "spidev"` (a deliberate kernel safety check,
+ * drivers/spi/spidev.c:spidev_of_check) -- "rohm,dh2228fv" is the standard,
+ * widely-documented placeholder compatible string that IS in its match
+ * table, used throughout the kernel's own docs for exactly this generic-
+ * userspace-SPI-access case. reg = <0>: only one spi_csn pin exists in the
+ * XDC, so AD9361 is the sole device on this bus at chip-select 0. */
+/* AD9361 SPI0 -- CONFIRMED NOT CLOCKED (2026-10-14): read back a consistent
+ * 0x037 (Product ID) = 0x00 regardless of reset/CS-polarity state, byte-for-
+ * byte matching the earlier pinctrl/cpufreq deadlock pattern. Checked
+ * /sys/kernel/debug/clk/clk_summary live: spi0_ref shows enable_cnt=0 and
+ * is NOT enabled, while the sibling disabled spi1_ref and qspi_ref both
+ * show enabled -- the clock gate to THIS specific peripheral never turned
+ * on. FSBL already statically enables it (psu_init.c:
+ * PSU_CRL_APB_SPI0_REF_CTRL_CLKACT=0x1, same mechanism that makes UART1/
+ * Ethernet/SD1 work with zero Linux involvement) -- but
+ * power-domains = <0x12 0x23> (auto-generated, LPD power-domain gate,
+ * PMU-firmware-mediated, downstream of FSBL's clock-source config) is a
+ * SEPARATE gate only Linux's runtime-PM path controls. Deleting it so
+ * cdns-spi never makes that PM/IPI request at all, relying on FSBL's
+ * already-active clock instead -- same fix shape as the SD1 pinctrl
+ * deadlock earlier today. */
+&{/axi/spi@ff040000} {
+	/delete-property/ power-domains;
+
+	ad9361_spi: ad9361@0 {
+		compatible = "rohm,dh2228fv";
+		reg = <0>;
+		spi-max-frequency = <10000000>;
+	};
+};
+
+/* RE-ENABLED for bisection (2026-10-06): neither usb@ff9d0000 nor ethernet@ff0e0000 was ever
+ * individually tested -- both were only ever disabled as part of the big "re-enable everything"
+ * batch that caused the U-Boot-stage regression (hang right after "DRAM: 2 GiB", before
+ * PMUFW/Core/MMC). Re-enabling just these two (PS-side MIO-muxed controllers, unrelated to the
+ * PL/XDC pin-inheritance bug class that hit AD9361/UART) as a small, isolated next step. If this
+ * reproduces the U-Boot hang, these two are implicated and need further bisection between them;
+ * if not, the real culprit is among the other still-disabled nodes below. */
+&{/axi/i2c@ff020000} { status = "disabled"; };
+&{/axi/i2c@ff030000} { status = "disabled"; };
+&{/axi/can@ff070000} { status = "disabled"; };
+&{/axi/gpu@fd4b0000} { status = "disabled"; };
+/* RE-ENABLED: AD9361's reset-gpios/enable-gpios/en_agc-gpios/sync-gpios/txnrx-gpios all
+ * reference this controller (phandle in the ad9361 node's *-gpios properties). With it
+ * disabled, ad9361_probe entered repeatedly but never completed -- "spi spi1.0: deferred
+ * probe pending" in dmesg, since the GPIO provider it needs never registers. Not
+ * dm-pre-reloc flagged, so shouldn't resurrect the earlier U-Boot-stage hang. */
+&{/axi/pcie@fd0e0000} { status = "disabled"; };
+/* RE-ENABLED (2026-10-06): this is the shared PS-GTR SerDes lane controller
+ * (xlnx,zynqmp-psgtr-v1.1) used by PCIe/USB3/SATA/DP/SGMII, not a PCIe-only node --
+ * disabling it during the earlier "disable everything" diagnostic round silently
+ * stranded the USB3 dwc3 controller, which references it via phandle for its
+ * "usb3-phy" (phys = <... lane2 ...>, maximum-speed = "super-speed"). With this
+ * provider missing, dwc3's probe deferred forever with zero dmesg output --
+ * explaining why USB showed no controller-probe activity at all despite USB0's
+ * MIO52-64 ULPI pins and PS8 config being genuinely correct. PCIe itself stays
+ * disabled above, so nothing requests a PCIe lane from this node -- no conflict. */
+&{/axi/phy@fd400000} { status = "okay"; };
+&{/axi/rtc@ffa60000} { status = "disabled"; };
+&{/axi/ahci@fd0c0000} { status = "disabled"; };
+&{/axi/watchdog@fd4d0000} { status = "disabled"; };
+&{/axi/ams@ffa50000} { status = "disabled"; };
+&{/axi/display@fd4a0000} { status = "disabled"; };
+&{/axi/dma-controller@fd500000} { status = "disabled"; };
+&{/axi/dma-controller@fd510000} { status = "disabled"; };
+&{/axi/dma-controller@fd520000} { status = "disabled"; };
+&{/axi/dma-controller@fd530000} { status = "disabled"; };
+&{/axi/dma-controller@fd540000} { status = "disabled"; };
+&{/axi/dma-controller@fd550000} { status = "disabled"; };
+&{/axi/dma-controller@fd560000} { status = "disabled"; };
+&{/axi/dma-controller@fd570000} { status = "disabled"; };
+
+/* SD-controller-disabled test INVALIDATED ITSELF: this device tree is shared between u-boot
+ * and the kernel (both read system.dtb from the same BOOT.BIN/FIT image), so disabling
+ * mmc@ff170000 broke u-boot's OWN ability to find the SD card at all -- it never even reached
+ * the kernel, falling through JTAG/QSPI/NAND/USB/PXE boot attempts down to an interactive
+ * "ZynqMP>" prompt. Reverted -- need a different approach to test "disabled for kernel only"
+ * (e.g. a u-boot "fdt rm" step in boot.scr between loading and bootm, not a static DT edit). */

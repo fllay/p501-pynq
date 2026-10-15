@@ -1,0 +1,13 @@
+[Unit]
+Description=USB CDC-ECM network gadget (PYNQ Jupyter-over-USB access)
+After=sysinit.target local-fs.target
+DefaultDependencies=no
+ConditionPathExists=/sys/class/udc
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/usb-gadget-ecm.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

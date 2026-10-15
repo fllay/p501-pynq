@@ -1,0 +1,6 @@
+/ {
+	chosen {
+		bootargs = "root=/dev/mmcblk0p2 rw earlycon earlyprintk rootfstype=ext4 rootwait devtmpfs.mount=1 uio_pdrv_genirq.of_id=\"generic-uio\" clk_ignore_unused cpufreq.off=1";
+		pynq_board = "Unknown";
+	};
+};

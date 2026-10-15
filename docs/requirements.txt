@@ -1,0 +1,21 @@
+# docs requirements file
+
+# For Juyter Notebooks in Sphinx
+
+numpy
+matplotlib
+nbsphinx
+cffi
+jupyter_client
+ipython
+pytest
+netifaces
+pandas
+sphinx
+sphinx_copybutton
+sphinx_rtd_theme
+breathe
+grpcio==1.64.0
+protobuf
+git+https://github.com/xilinx/pynq-metadata@main#egg=pynqmetadata
+git+https://github.com/xilinx/pynq-utils@main#egg=pynqutils
