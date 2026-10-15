@@ -1,0 +1,126 @@
+# AD9361 "fs/3 artifact" investigation log
+
+Open issue: a captured RX signal's FFT peak lands at exactly 1/3 of
+whatever sample rate is configured, instead of matching the real
+transmitted tone. This file is the durable record of everything tried —
+written specifically so it survives independent of any particular
+machine's local state (session notes, chat history, etc).
+
+## Symptom
+
+With the full RF chain locked (BBPLL, RX+TX RFPLL at 700MHz, FDD ENSM,
+LVDS digital interface, DMA pipeline all independently confirmed correct
+— see `README.md`'s "Status" section and `ad9361_driver.py`), transmitting
+a 1MHz tone and capturing on RX produces an FFT peak that does **not**
+land near 1MHz. Instead, it lands at exactly `sample_rate / 3`, confirmed
+precisely at three different configured sample rates:
+
+| Configured rate | Peak observed | Ratio |
+|---|---|---|
+| 3.84 MSPS | 1280.2 kHz | 0.3334 |
+| 7.68 MSPS (FIR bypassed) | 2560.3 kHz | 0.3334 |
+| 30.72 MSPS (FIR+R1+CLKRF bypassed) | 10241.2 kHz | 0.3333 |
+
+Back-solving "what sample rate would make this the real 1MHz tone"
+converges on ~3.000MHz regardless of configured rate — suspiciously
+precise but not a clean divisor of the 40MHz reference clock.
+
+## What's been ruled out, with evidence
+
+All of the following were tested across their **full range** and
+produced **zero measurable effect** on the artifact (same exact peak
+frequency, same magnitude, often bit-for-bit identical raw samples):
+
+1. **RX manual gain** (0x00 to 0x70) and **TX attenuation** (20dB to
+   60dB) — rules out front-end saturation/TX-leakage as the cause.
+2. **FPGA-side IDELAY taps** (`up_delay_cntrl` core, byte offset
+   `0x800 + n*4` for 13 lanes, values 0–31 swept on all lanes
+   simultaneously) — a genuine LVDS bit-alignment/skew problem would show
+   *some* variation across a full tap sweep; this showed none.
+3. **AD9361 chip-side `REG_RX_CLOCK_DATA_DELAY`** (SPI register `0x006`,
+   two 4-bit fields: clock_delay and data_delay) — full 16×16 grid swept,
+   using the real TX-tone-and-capture pipeline (not a synthetic test) as
+   the pass/fail signal. Peak landed at the identical fs/3 alias at every
+   one of 254 valid combinations.
+4. **RX/TX DC-offset calibration** (`BBDC_CAL`/`RFDC_CAL` via
+   `REG_CALIBRATION_CTRL` 0x016, ported from no-OS's
+   `ad9361_bb_dc_offset_calib()`/`ad9361_rf_dc_offset_calib()`) — both
+   report completing successfully (self-clear within timeout), but the
+   captured signal was bit-for-bit identical before and after.
+5. **FIR/decimation register field encoding** — direct register readback
+   confirmed `REG_RX/TX_ENABLE_FILTER_CTRL` exactly match the intended
+   values (R2/R1/CLKRF divider fields, FIR enable/bypass field) at three
+   different sample-rate configs. No write-address or field-encoding bug.
+6. **`util_cpack2` channel-enable count** — tested with 2 channels
+   enabled (R1 mode intent) and all 4 channels enabled; the real (non
+   zero-padded) channel data showed the identical artifact either way,
+   ruling out a channel-count/packing mismatch as the cause.
+7. **BIST/PN-based digital-interface auto-calibration attempt**
+   (`ad9361_dig_tune.py`, modeled on no-OS's `ad9361_dig_tune_rx()`) —
+   reported 0/256 passing combinations and left the ADC path unable to
+   even complete a DMA transfer afterward. This is likely a bug in how
+   the BIST PRBS injection or PN-checker enable was wired up in that
+   script (not yet root-caused), **not** a reliable negative result —
+   superseded by #3 above, which used the proven real-tone pipeline
+   instead and is far more trustworthy.
+
+## New structural finding: a fixed spur at exactly ADC_CLK/3
+
+With the entire decimation chain bypassed (R2=R1=CLKRF=FIR=1 on both
+RX and TX — i.e. the raw 61.44 MSPS ADC_CLK rate, no filtering anywhere),
+the captured I/Q samples are an **exact, zero-variance, repeating 3-sample
+sequence pinned at/near 12-bit full scale** (e.g. I cycles through
+`-1985, 2047, -2048` forever, every single sample, across 32768+ samples
+captured). This is not consistent with real RF/thermal noise, which would
+never be perfectly periodic and noise-free at this sample count.
+
+Hand-checked aliasing math: a fixed component at exactly
+**ADC_CLK/3 = 61.44MHz/3 = 20.48MHz**, present *before* any decimation,
+aliases through each of the three decimation configs in the table above
+to land at exactly their observed fs/3 peaks (`20.48 mod rate`, folded
+into the ±rate/2 range) — matching all three to within measurement
+precision. A direct full-bypass capture confirmed this: a massive
+symmetric spur appears at exactly **±20.48MHz** (154dB), about 88dB
+*above* the real transmitted 1MHz tone's peak (66dB) in the same capture.
+20.48MHz is also exactly `BBPLL/48`.
+
+## Where this leaves it
+
+Every register-level knob this project's hand-rolled driver exposes has
+been tried and ruled out — five independent subsystems, 550+ tested
+register settings, zero effect on any of them. That is not consistent
+with a simple mistuned parameter. Two remaining explanations:
+
+- **(a)** A fixed test-pattern or unintended multiplexer default baked
+  into the bitstream at a level below any AXI-Lite or SPI register this
+  driver controls (a Vivado block-design wiring choice, a debug core, or
+  similar) — would need Vivado/ILA-level inspection to find.
+- **(b)** A real hardware fault on this specific board's RX/LVDS path.
+
+**Next planned step**: boot the same physical board into the original
+`p501_iio` PetaLinux image (ADI kernel driver + libiio, already proven
+working for AD9361 register/control-plane access via the USB gadget —
+see the main project history) and run an equivalent TX-tone/RX-capture
+test using `iio_writedev`/`iio_readdev` or GNU Radio's `gr-iio`. If the
+vendor's own fully-validated stack produces a clean result on the same
+silicon, that proves (a) — a remaining gap in this hand-rolled driver. If
+it *also* shows the fs/3 artifact, that points to (b) — board hardware.
+
+Needs a physical SD card swap (or DIP-switch boot-mode change to the
+vendor factory firmware on eMMC) — not something that can be done over
+SSH, since it changes which OS boots.
+
+## Scripts (all in this directory)
+
+- `ad9361_full_bypass_test.py` — full decimation bypass + direct
+  ±20.48MHz spur check.
+- `ad9361_dig_tune.py` — the BIST/PN-based calibration attempt (see
+  caveat in finding #7 above).
+- `ad9361_delay_sweep_real.py` — the trustworthy real-tone-based 16×16
+  chip-side delay sweep (finding #3).
+- `ad9361_dc_cal_test.py` — DC-offset calibration attempt (finding #4).
+- `ad9361_tone_test.py` — the main, working end-to-end TX/RX/FFT/plot
+  test (the one producing the fs/3 symptom in the first place).
+- `ad9361_driver.py` — the AD9361 chip-level register driver (BBPLL,
+  RFPLL, ENSM, gain/atten, clock chain).
+- `axi_dmac.py` — hand-written driver for ADI's `axi_dmac` core.

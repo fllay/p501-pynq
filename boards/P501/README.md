@@ -6,7 +6,7 @@ flow (`make BOARDS=P501`), on top of the already-working PetaLinux project at
 [fllay/puzi501iio](https://github.com/fllay/puzi501iio) (Vivado HDL + PetaLinux
 BSP for this board — start there for the hardware/pin-level bring-up story).
 
-## Status (2026-10-15)
+## Status (2026-10-15, updated same day in a continuation session)
 
 Hardware-verified on real hardware:
 
@@ -20,14 +20,36 @@ Hardware-verified on real hardware:
 - AD9361 responds correctly over SPI (`REG_PRODUCT_ID` reads `0x0A`, matching
   the expected `(val & 0xF8) == 0x08` signature) — see
   [`notebooks/ad9361_spi_test.py`](notebooks/ad9361_spi_test.py).
+- Full register-level RF bring-up: BBPLL lock (983.04MHz), RX+TX RFPLL lock
+  to an arbitrary LO (tested at 700MHz), FDD ENSM state, DMA TX/RX pipeline
+  (`axi_ad9361` core reset/enable, LVDS digital interface, cache-coherent
+  `pynq.allocate()` buffers) — see [`notebooks/ad9361_driver.py`](notebooks/ad9361_driver.py)
+  and [`notebooks/ad9361_tone_test.py`](notebooks/ad9361_tone_test.py). Four
+  real register-level bugs found and fixed along the way (missing
+  `REG_CLOCK_ENABLE` write, RX/TX synth power-down + lock-detect bypass
+  defaults, missing `DUAL_SYNTH_MODE` for FDD, an ENSM force-state
+  read-modify-write bug), plus a fifth, bigger one: `axi_ad9361`'s DAC
+  sub-block sits at a **`+0x4000` address offset** from the ADC sub-block
+  (different `COMMON_ID`, confirmed from this project's own RTL) — every
+  DAC register write had been silently landing on the wrong address, so TX
+  had never transmitted anything at all until this was found.
 
-Not yet done: full AD9361 RF bring-up (BBPLL calibration, RX/TX RFPLL LO
-lock, ENSM enable, gain control, RX/TX quadrature/DC-offset calibration) —
-needed before an actual RF tone/loopback test makes sense. `axi_ad9361` in
-this design is ADI's real HDL core but only the data-path/DMA framer; chip
-register control goes through the PS's hardware SPI0, routed through PL
-fabric (so it's only live once `Overlay()` has actually downloaded a
-bitstream).
+**Known open issue — captured RX content does not match the transmitted
+tone (the "fs/3 artifact")**: see
+[`notebooks/AD9361_FS3_INVESTIGATION.md`](notebooks/AD9361_FS3_INVESTIGATION.md)
+for the full writeup. Short version: the FFT peak of a captured signal
+lands at exactly 1/3 of whatever sample rate is configured, regardless of
+decimation settings, RX gain, TX attenuation, both available digital-
+interface delay-tuning mechanisms (full range swept on each), or RX/TX
+DC-offset calibration — none of which had any effect. Next step planned:
+compare against the vendor's own proven kernel/libiio stack
+([fllay/puzi501iio](https://github.com/fllay/puzi501iio)) on the same
+board to determine whether this is a remaining gap in this project's
+hand-rolled register driver or a real hardware issue.
+
+Not yet done: RX/TX quadrature calibration (distinct from the DC-offset
+calibration above, which *was* tried), AGC, full 2T2R mode (this project
+has only exercised R1/single-channel mode).
 
 ## Architecture
 

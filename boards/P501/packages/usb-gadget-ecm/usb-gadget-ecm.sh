@@ -5,8 +5,8 @@
 # Type-A port, independent of the board's real Ethernet/PL state.
 
 GADGET=/sys/kernel/config/usb_gadget/g_ecm
-ECM_DEV_ADDR="02:1a:2b:3c:4d:01"   # device side of the virtual Ethernet link
-ECM_HOST_ADDR="02:1a:2b:3c:4d:02"  # host side, as seen by the PC
+ECM_DEV_ADDR="02:1a:2b:3c:4d:11"   # device side of the virtual Ethernet link
+ECM_HOST_ADDR="02:1a:2b:3c:4d:12"  # host side, as seen by the PC
 ECM_DEV_IP="192.168.2.1/24"        # matches the well-known Pluto/p501_iio convention
 
 log() {
@@ -24,12 +24,16 @@ mkdir -p "$GADGET" || { log "failed to create $GADGET"; exit 1; }
 cd "$GADGET" || exit 1
 
 echo 0x1209 > idVendor      # pid.codes shared test/hobbyist VID
-echo 0x0001 > idProduct     # arbitrary PID within that pool
+echo 0x0002 > idProduct     # distinct from the earlier composite IIO+ECM gadget
+                            # (same idVendor/idProduct/serial/MAC as that gadget
+                            # made macOS reuse cached device identity and never
+                            # bind a fresh network driver for this one -- see
+                            # boards/P501/README.md)
 echo 0x0320 > bcdUSB        # advertise USB 3.2 Gen1 (SuperSpeed) capability
 echo 0x0100 > bcdDevice
 
 mkdir -p strings/0x409
-echo "P501-0001"          > strings/0x409/serialnumber
+echo "P501-0002"          > strings/0x409/serialnumber
 echo "Puzhi"               > strings/0x409/manufacturer
 echo "P501 PYNQ (ECM gadget)" > strings/0x409/product
 
