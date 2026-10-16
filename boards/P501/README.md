@@ -6,6 +6,8 @@ flow (`make BOARDS=P501`), on top of the already-working PetaLinux project at
 [fllay/puzi501iio](https://github.com/fllay/puzi501iio) (Vivado HDL + PetaLinux
 BSP for this board — start there for the hardware/pin-level bring-up story).
 
+> **Detailed AD9361 bring-up report (root causes, figures, validation, open issue):** [`docs/AD9361_BRINGUP_REPORT.md`](docs/AD9361_BRINGUP_REPORT.md)
+
 ## Status (2026-10-15, updated same day in a continuation session)
 
 Hardware-verified on real hardware:

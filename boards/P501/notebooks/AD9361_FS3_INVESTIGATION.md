@@ -1,3 +1,5 @@
+> **SUPERSEDED (2026-10-17):** the fs/3 / frozen-capture problem described below was traced to missing driver configuration (unloaded RX FIR, uninitialised RX/TX analog, wrong DAC clock divider and DAC DATARATE). See [`../docs/AD9361_BRINGUP_REPORT.md`](../docs/AD9361_BRINGUP_REPORT.md). Kept for history.
+
 # AD9361 "fs/3 artifact" investigation log
 
 Open issue: a captured RX signal's FFT peak lands at exactly 1/3 of
