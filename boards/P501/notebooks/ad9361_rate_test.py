@@ -5,7 +5,7 @@ Chain at 30.72 MSPS with BBPLL=983.04MHz: ADC_CLK=BBPLL/16=61.44MHz,
 RX: R2=2 (/2), R1=1, CLKRF=1, FIR bypass => 30.72 MSPS.
 TX: FIR bypass, CLKTF=1, T1=1, T2=2 (x2) => DAC_CLK=61.44MHz (dac_div=1).
 In R1 mode l_clk = 2 x fs = 61.44 MHz, so DAC datarate stays 1.
-usage: ad9361_rate_test.py [rx_delay tx_delay]  (LVDS clk/data delay nibbles)
+usage: ad9361_rate_test.py [30.72|61.44] [rx_delay tx_delay]  (LVDS clk/data delay bytes)
 """
 import sys
 sys.path.insert(0, '/home/xilinx/jupyter_notebooks')
@@ -16,22 +16,33 @@ from ad9361_driver import AD9361
 from axi_dmac import AxiDmac
 import ad9361_full_bypass_test as fb
 
-FS = 30_720_000
+RATES = {
+    30.72: dict(fs=30_720_000, adc_div=16, adc_clk=61_440_000, bw=18_000_000,
+                chain=dict(r2_div=2, r1_div=1, clkrf_div=1, rx_fir_div=1,
+                           dac_div=1, t2_div=2, t1_div=1, clktf_div=1, tx_fir_div=1),
+                tones=(3e6, -3e6, 9e6, -9e6)),
+    61.44: dict(fs=61_440_000, adc_div=4, adc_clk=245_760_000, bw=50_000_000,
+                chain=dict(r2_div=2, r1_div=2, clkrf_div=1, rx_fir_div=1,
+                           dac_div=2, t2_div=2, t1_div=1, clktf_div=1, tx_fir_div=1),
+                tones=(5e6, -5e6, 15e6, -15e6, 25e6, -25e6)),
+}
+RATE = float(sys.argv[1]) if len(sys.argv) > 1 else 30.72
+CFG = RATES[RATE]
+FS = CFG["fs"]
 N = 8192
 LO = 700_000_000
-RF_BW = 18_000_000
+RF_BW = CFG["bw"]
 TX_ATTEN_DB = 10
 RX_GAIN_INDEX = 45
-RX_DELAY = int(sys.argv[1], 0) if len(sys.argv) > 2 else fb.RX_CLOCK_DATA_DELAY
-TX_DELAY = int(sys.argv[2], 0) if len(sys.argv) > 2 else fb.TX_CLOCK_DATA_DELAY
+RX_DELAY = int(sys.argv[2], 0) if len(sys.argv) > 3 else fb.RX_CLOCK_DATA_DELAY
+TX_DELAY = int(sys.argv[3], 0) if len(sys.argv) > 3 else fb.TX_CLOCK_DATA_DELAY
 
 
 def bring_up(ol, rx_delay=RX_DELAY, tx_delay=TX_DELAY):
     ad = AD9361()
     ad.power_up_clocks()
     assert ad.set_bbpll_rate(983_040_000), "BBPLL did not lock"
-    ad.set_clock_chain(r2_div=2, r1_div=1, clkrf_div=1, rx_fir_div=1,
-                       dac_div=1, t2_div=2, t1_div=1, clktf_div=1, tx_fir_div=1)
+    ad.set_clock_chain(adc_div=CFG["adc_div"], **CFG["chain"])
     ad.synth_cp_calib(False)
     ad.synth_cp_calib(True)
     rx_ok = ad.set_rx_lo_freq(LO)
@@ -45,7 +56,7 @@ def bring_up(ol, rx_delay=RX_DELAY, tx_delay=TX_DELAY):
     ad.reg_write(fb.REG_TX_CLOCK_DATA_DELAY, tx_delay)
     ad.reg_write(fb.REG_LVDS_BIAS_CTRL, fb.LVDS_BIAS_CTRL)
     res = ad.analog_init(rf_rx_bw_hz=RF_BW, rf_tx_bw_hz=RF_BW,
-                         adc_clk_hz=61_440_000, rx_freq_hz=LO,
+                         adc_clk_hz=CFG["adc_clk"], rx_freq_hz=LO,
                          clkrf_hz=FS, clktf_hz=FS)
     ad.set_rx_manual_gain(RX_GAIN_INDEX)
     ad.set_tx_atten_db(TX_ATTEN_DB)
@@ -65,12 +76,12 @@ def main():
         print(f"{FS/1e6:.2f} MSPS, LO {LO/1e6:.0f} MHz, delays rx=0x{RX_DELAY:02X} tx=0x{TX_DELAY:02X}: "
               f"locks={rx_ok},{tx_ok} cal={res} ensm=0x{ad.ensm_state():X}")
         print(f"  axi_ad9361 clk counts: ADC=0x{ol.axi_ad9361.read(0x54):X} DAC=0x{ol.axi_ad9361.read(0x4054):X} "
-              f"(7.68MHz=0x13A9, scale=freq/100MHz*65536)")
+              f"(freq/100MHz*65536; 7.68MHz=0x13A9)")
 
         def band(mag, f0, w=40e3):
             return mag[np.abs(freqs - f0) < w].max()
 
-        for tgt in (3e6, -3e6, 9e6, -9e6):
+        for tgt in CFG["tones"]:
             cyc = round(tgt * N / FS)
             f = cyc * FS / N
             tone = np.exp(2j * np.pi * cyc * n / N)
@@ -101,7 +112,7 @@ def main():
             i = int(m_on.argmax())
             pk, fp = m_on[i], freqs[i]
             img = band(m_on, -f)
-            good = abs(fp - f) < 20e3 and pk - img > 20
+            good = abs(fp - f) < 30e3 and pk - img > 20
             print(f"  tone {f/1e6:6.2f}M: dma_ok={ok} peak {fp/1e6:7.3f}M {pk:6.1f} dB "
                   f"(TX off {band(m_off, f):5.1f}) image {img:5.1f} rej {pk-img:5.1f} "
                   f"std {sd:6.1f} floor {np.median(m_on):5.1f} {'OK' if good else 'CHECK'}")
