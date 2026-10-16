@@ -1052,7 +1052,8 @@ class AD9361:
 
     def analog_init(self, rf_rx_bw_hz=4_000_000, rf_tx_bw_hz=4_000_000,
                     bbpll_hz=983_040_000, adc_clk_hz=61_440_000,
-                    rx_freq_hz=700_000_000, rx_input=0):
+                    rx_freq_hz=700_000_000, rx_input=0,
+                    clkrf_hz=7_680_000, clktf_hz=7_680_000):
         """Full RX+TX analog bring-up in the vendor ad9361_setup() order
         (gain control, filter/TIA/ADC setup, DC-offset cals, TX quad cal).
         Call after both LOs are locked, with ENSM still in ALERT. Returns a
@@ -1070,7 +1071,8 @@ class AD9361:
         self.rx_adc_setup(bbpll_hz, adc_clk_hz)
         r["bb_dc"] = self.bb_dc_offset_calib()
         r["rf_dc"] = self.rf_dc_offset_calib(rx_freq_hz)
-        r["tx_quad"] = self.tx_quad_calib(rx_bb, tx_bb)
+        r["tx_quad"] = self.tx_quad_calib(rx_bb, tx_bb, clkrf_hz=clkrf_hz,
+                                           clktf_hz=clktf_hz)
         return r
 
     # -- ENSM / gain -------------------------------------------------------
