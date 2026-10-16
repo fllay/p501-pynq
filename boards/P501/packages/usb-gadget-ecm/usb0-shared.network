@@ -1,0 +1,25 @@
+# usb0 profile 2/2: SHARED. Used when no DHCP server answered: the board takes
+# its well-known address 192.168.2.1/24 and serves DHCP, so a plain
+# auto-configuring PC (NetworkManager / macOS / Windows defaults) gets
+# 192.168.2.x with no manual `ip addr add`. No router/DNS is advertised, so the
+# host's default route and DNS are never touched.
+# Installed to /run/systemd/network/10-usb0.network by usb-gadget-net.sh.
+[Match]
+Name=usb0
+
+[Link]
+RequiredForOnline=no
+
+[Network]
+Address=192.168.2.1/24
+DHCPServer=yes
+IPv6AcceptRA=no
+MulticastDNS=yes
+LLMNR=yes
+
+[DHCPServer]
+PoolOffset=2
+PoolSize=8
+EmitDNS=no
+EmitRouter=no
+EmitNTP=no

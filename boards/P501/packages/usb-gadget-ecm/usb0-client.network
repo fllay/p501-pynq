@@ -1,0 +1,21 @@
+# usb0 profile 1/2: DHCP CLIENT. Active first on every link-up; if the host
+# shares its connection (NetworkManager ipv4.method=shared / Windows ICS) it
+# hands out an address + route + DNS and the board stays in this mode.
+# Installed to /run/systemd/network/10-usb0.network by usb-gadget-net.sh.
+[Match]
+Name=usb0
+
+[Link]
+RequiredForOnline=no
+
+[Network]
+DHCP=ipv4
+LinkLocalAddressing=ipv6
+IPv6AcceptRA=no
+MulticastDNS=yes
+LLMNR=yes
+
+[DHCPv4]
+RouteMetric=2000
+UseHostname=no
+UseNTP=no

@@ -322,9 +322,11 @@ latch, `0x0A7` TX quad status (`bit1` LO leak, `bit0` sideband), `0x109` RX1 man
 table), `0x016` calibration control (self-clearing bits).
 
 **Host-side practicalities:**
-* After a board reboot/power-cycle the host interface (`enx021a2b3c4d12`) comes back without an IPv4 address and NetworkManager
-  keeps flushing it: `sudo ip addr add 192.168.2.2/24 dev <iface>` and `sudo nmcli device set <iface> managed no`.
-  Never run a bare `dhclient` on it (it hangs).
+* **USB networking is automatic** (see `README.md` § "USB networking"): plug in, let the host auto-configure the USB-Ethernet
+  adapter (default NetworkManager/macOS/Windows behaviour), then `ssh xilinx@pynq.local` or `xilinx@192.168.2.1`.
+  The old manual `sudo ip addr add 192.168.2.2/24 dev <iface>` / `nmcli device set <iface> managed no` workaround is no longer
+  needed — and `managed no` must be undone (`nmcli device set <iface> managed yes`) or the host will not configure itself.
+  Never run a bare `dhclient` on the interface (it hangs).
 * Key-based SSH to `xilinx@192.168.2.1` works; `sudo -S` on the board needs the password.
 * Use `/usr/bin/python3` on the host for numpy/matplotlib/paramiko once a PetaLinux `settings.sh` has been sourced
   (it shadows `python3`/`git`; `git push` should use `/usr/bin/git`).

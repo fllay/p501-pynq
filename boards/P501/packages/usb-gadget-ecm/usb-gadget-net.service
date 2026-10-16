@@ -1,0 +1,12 @@
+[Unit]
+Description=USB gadget (usb0) automatic IP: DHCP client, else shared DHCP server
+After=usb-gadget-ecm.service systemd-networkd.service systemd-resolved.service
+Wants=systemd-networkd.service
+
+[Service]
+ExecStart=/usr/bin/usb-gadget-net.sh
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

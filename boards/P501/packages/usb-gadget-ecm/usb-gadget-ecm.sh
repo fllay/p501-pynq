@@ -7,7 +7,6 @@
 GADGET=/sys/kernel/config/usb_gadget/g_ecm
 ECM_DEV_ADDR="02:1a:2b:3c:4d:11"   # device side of the virtual Ethernet link
 ECM_HOST_ADDR="02:1a:2b:3c:4d:12"  # host side, as seen by the PC
-ECM_DEV_IP="192.168.2.1/24"        # matches the well-known Pluto/p501_iio convention
 
 log() {
 	echo "usb-gadget-ecm: $*" | systemd-cat -t usb-gadget-ecm 2>/dev/null || echo "usb-gadget-ecm: $*"
@@ -60,9 +59,10 @@ for i in $(seq 1 20); do
 	sleep 0.1
 done
 if [ -e /sys/class/net/usb0 ]; then
-	ip addr add "$ECM_DEV_IP" dev usb0 2>/dev/null
+	# IP configuration is handled by usb-gadget-net.service (DHCP client when
+	# the host shares its connection, else 192.168.2.1/24 + DHCP server).
 	ip link set usb0 up
-	log "usb0 up at $ECM_DEV_IP"
+	log "usb0 up (addressing handled by usb-gadget-net.service)"
 else
 	log "usb0 never appeared after UDC bind"
 fi

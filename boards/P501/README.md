@@ -60,6 +60,24 @@ Not yet done: RX/TX quadrature calibration (distinct from the DC-offset
 calibration above, which *was* tried), AGC, full 2T2R mode (this project
 has only exercised R1/single-channel mode).
 
+## USB networking (usb0 gadget)
+
+The board shows up on the host as a USB-Ethernet adapter (CDC-ECM, `usb-gadget-ecm`) and configures its side automatically
+(`usb-gadget-net`, modelled on Raspberry Pi OS' `rpi-usb-gadget`; plain systemd-networkd + systemd-resolved, nothing extra installed):
+
+1. **Shared mode (default).** If no DHCP server answers within ~10 s of the link coming up, the board takes `192.168.2.1/24`
+   and runs a DHCP server (pool `192.168.2.2-.9`, **no router or DNS advertised**, so the host's default route and DNS are
+   never touched). A host with default settings (NetworkManager "Automatic (DHCP)", macOS, Windows) gets `192.168.2.x` with no
+   manual commands.
+2. **Client mode (host shares its connection).** If the host provides DHCP (NetworkManager `ipv4.method shared`, Windows ICS),
+   the board becomes a DHCP client, gets e.g. `10.42.0.x`, and has internet/DNS through the host's NAT.
+3. **mDNS/LLMNR.** `systemd-resolved` answers for the hostname in both modes: `ssh xilinx@pynq.local`.
+
+The supervisor re-evaluates when the cable is replugged and also when the host stops answering (e.g. you switch the host between
+shared and automatic without unplugging): roughly 20 s for client-to-shared and up to about a minute for shared-to-client (it needs two
+failed probes so a live SSH session is never dropped on a false alarm). `journalctl -t usb-gadget-net` shows what it decided.
+`DHCP_WAIT` (default 10 s) is configurable in `usb-gadget-net.sh`. The static `192.168.2.1` of earlier images is kept in shared mode.
+
 ## Architecture
 
 Built around the pattern from
