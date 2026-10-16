@@ -190,6 +190,28 @@ RX: every setting works except data-delay 0 (DMA timeout), so the default `0x04`
 | 30 s continuous cyclic TX, DAC underflow flag polled every 0.25 s (120 polls) | **0 underflow events**; RX tone level spread 0.14 dB, frequency spread 0 Hz. The sticky flag (`0x4088`, write 1 to clear) does assert whenever the DMA is idle/stopped, as designed |
 | 61.44 MSPS clock counters | ADC = DAC = `0x13A93` = 122.88 MHz (= `l_clk`) |
 
+### 5.6 2R2T (2x2 MIMO) at 3.84 MSPS, 700 MHz LO
+
+Script: `notebooks/ad9361_mimo_test.py`. Worked on the first full attempt once the 2R2T differences were applied:
+`enable_rx2tx2()`, `R2T2_TIMING` (bit 2) in `PARALLEL_PORT_CONF_1`, `axi_ad9361` R1_MODE bits cleared (ADC + DAC) with four
+channels enabled, **DAC `DATARATE` = 3** (`l_clk = 4·fs`), RX2 gain (`0x10C`) and TX2 attenuation (`0x075/0x076`), and the
+TX quad cal now also requires TX2 convergence (status read from `0x0A8`). DMA word order per sample is `I1, Q1, I2, Q2`.
+
+| Check | Result |
+|---|---|
+| `l_clk` count (`0x54` / `0x4054`) | `0x2752` = 15.36 MHz = 4·fs (both ADC and DAC side) |
+| Calibrations | BB/RF DC, filters, TX quad cal (TX1 **and** TX2) all converge |
+| Digital loopback, TX1 = +1.0 MHz and TX2 = −0.5 MHz simultaneously | RX1 sees only +1.0 MHz and RX2 only −0.5 MHz, both at 132.5 dB; the other tone is ≈ 37–39 dB (≈ 95 dB isolation). With one TX silent the other channel is exactly zero ⇒ no channel swap, DMA layout and R2 mode correct |
+| RX1 vs RX2 gain | identical noise floor at low gain (29.3 vs 29.9 dB at index 10) ⇒ equal receiver gain |
+| TX1 vs TX2 attenuation | each channel's attenuator works independently and in 10 dB steps |
+| Over-the-air coupling (TX atten 30 dB, RX gain 40; dB) | TX1→RX1 88.5, TX1→RX2 117.4, TX2→RX1 65.3, TX2→RX2 84.6 |
+
+The RX2-hotter / TX2-weaker asymmetry of the over-the-air matrix is therefore **RF coupling** (antenna placement/cabling,
+not visible to the software), not a gain or register error; verify with matched conducted paths. RX2 also saturates at
+134.4 dB when overdriven. The random analog state of §6 is **also present in 2R2T but milder**: over 14 ALERT → FDD entries
+TX1→RX1 was 87.2 dB in 11 entries and 80.7–82.0 dB in 3; the other three paths varied by ≈ 1.5–3.5 dB; the digital loopback
+stayed at 132.5 dB on both channels. `settle()` has not yet been extended to 2R2T.
+
 ---
 
 ## 6. Open issue: random analog TX/RX state at every FDD entry
@@ -278,9 +300,10 @@ table), `0x016` calibration control (self-clearing bits).
 | `ad9361_rate_delay_sweep.py` | live LVDS delay-window sweep |
 | `ad9361_lo_sweep_test.py [MHz ...]` | multi-LO tone test |
 | `ad9361_long_tx_test.py [s]` | continuous TX + underflow monitor |
+| `ad9361_mimo_test.py [datarate]` | 2R2T bring-up, digital-loopback channel-mapping check, RF TX1/TX2 → RX1/RX2 |
 | `ad9361_fir_test.py`, `ad9361_fir_isolate.py`, `ad9361_tone_test.py` | older flows (pre-`analog_init`) — kept for history, **stale** |
 | `docs/tools/collect_report_data.py`, `docs/tools/make_figures.py` | regenerate the data and figures of this report |
 
-**Not done / ideas:** libiio comparison (§6); 2.4 GHz and above (gain tables); 61.44 MSPS with the FIR enabled;
+**Not done / ideas:** libiio comparison (§6); 2R2T at higher rates and `settle()` for 2R2T; 2.4 GHz and above (gain tables); 61.44 MSPS with the FIR enabled;
 RX quad/DC tracking tuned instead of simply disabled; characterising the ±band-edge rejection and the FIR-bypass noise
 floor; a loopback-based self-test inside the driver so `settle()` is not test-script-only.

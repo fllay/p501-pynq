@@ -36,6 +36,11 @@ REG_ENSM_CONFIG_2 = 0x015
 REG_CALIBRATION_CTRL = 0x016
 REG_STATE = 0x017
 REG_TX1_ATTEN_0 = 0x073
+REG_TX2_ATTEN_0 = 0x075
+REG_TX2_ATTEN_1 = 0x076
+REG_RX2_MANUAL_LMT_FULL_GAIN = 0x10C
+REG_QUAD_CAL_STATUS_TX2 = 0x0A8
+R2T2_TIMING = 1 << 2
 REG_TX1_ATTEN_1 = 0x074
 REG_CLOCK_CTRL = 0x045
 REG_SDM_CTRL_1 = 0x03F
@@ -153,6 +158,8 @@ RX_CHANNEL_ENABLE = lambda x: (x & 0x3) << 6
 TX_CHANNEL_ENABLE = lambda x: (x & 0x3) << 6
 RX_1 = 1
 TX_1 = 1
+RX_2 = 2
+TX_2 = 2
 BYPASS_LD_SYNTH = 1 << 0
 TO_ALERT = 1 << 0
 FORCE_ALERT_STATE = 1 << 2
@@ -362,6 +369,7 @@ def div_round_closest(a, b):
 class AD9361:
     def __init__(self, bus=1, cs=0, ref_clk_hz=40_000_000):
         self.ref_clk_hz = ref_clk_hz
+        self.rx2tx2 = False
         self._release_control_gpios()
         self.spi = spidev.SpiDev()
         self.spi.open(bus, cs)
@@ -929,7 +937,10 @@ class AD9361:
         self.reg_write(REG_QUAD_CAL_CTRL, base)
         if not self.run_calibration(TX_QUAD_CAL):
             return None
-        return self.reg_read(REG_QUAD_CAL_STATUS_TX1) & (TX1_LO_CONV | TX1_SSB_CONV)
+        res = self.reg_read(REG_QUAD_CAL_STATUS_TX1) & (TX1_LO_CONV | TX1_SSB_CONV)
+        if self.rx2tx2:
+            res &= self.reg_read(REG_QUAD_CAL_STATUS_TX2) & (TX1_LO_CONV | TX1_SSB_CONV)
+        return res
 
     def tx_quad_calib(self, bw_rx_hz, bw_tx_hz, rx_phase=-1,
                       clkrf_hz=7_680_000, clktf_hz=7_680_000):
@@ -1089,12 +1100,14 @@ class AD9361:
     def analog_init(self, rf_rx_bw_hz=4_000_000, rf_tx_bw_hz=4_000_000,
                     bbpll_hz=983_040_000, adc_clk_hz=61_440_000,
                     rx_freq_hz=700_000_000, rx_input=0,
-                    clkrf_hz=7_680_000, clktf_hz=7_680_000, tracking=False):
+                    clkrf_hz=7_680_000, clktf_hz=7_680_000, tracking=False,
+                    rx2tx2=False):
         """Full RX+TX analog bring-up in the vendor ad9361_setup() order
         (gain control, filter/TIA/ADC setup, DC-offset cals, TX quad cal).
         Call after both LOs are locked, with ENSM still in ALERT. Returns a
         dict of per-step results."""
         rx_bb, tx_bb = rf_rx_bw_hz // 2, rf_tx_bw_hz // 2
+        self.rx2tx2 = bool(rx2tx2)
         self.rf_port_setup(rx_input)
         self.load_mixer_gm_subtable()
         self.gain_control_manual()
@@ -1141,23 +1154,36 @@ class AD9361:
     def ensm_state(self):
         return self.reg_readf(REG_STATE, 0xF)
 
-    def set_rx_manual_gain(self, gain_index=0x58):
-        """REG_RX1_MANUAL_LMT_FULL_GAIN -- full gain-table index, manual
-        mode. 0x58 (~ -ish mid-table) is a conservative starting point;
-        tune empirically once a signal is visible."""
-        self.reg_write(REG_RX1_MANUAL_LMT_FULL_GAIN, gain_index)
+    def enable_rx2tx2(self):
+        """Enable both RX and both TX channels (2R2T). Also tells the quad
+        calibration to require TX2 convergence."""
+        self.reg_writef(REG_RX_ENABLE_FILTER_CTRL, RX_CHANNEL_ENABLE(0x3), RX_1 | RX_2)
+        self.reg_writef(REG_TX_ENABLE_FILTER_CTRL, TX_CHANNEL_ENABLE(0x3), TX_1 | TX_2)
+        self.rx2tx2 = True
 
-    def set_tx_atten_db(self, atten_db):
-        """REG_TX1_ATTEN_0/1: 0.25dB/LSB, 10-bit value split across two
-        registers. atten_db in [0, 89.75]."""
+    def set_rx_manual_gain(self, gain_index=0x58, channels=(1,)):
+        """REG_RX{1,2}_MANUAL_LMT_FULL_GAIN -- full gain-table index (0-76
+        with the 200-1300 MHz table), manual mode. channels: (1,), (2,) or (1, 2)."""
+        if 1 in channels:
+            self.reg_write(REG_RX1_MANUAL_LMT_FULL_GAIN, gain_index)
+        if 2 in channels:
+            self.reg_write(REG_RX2_MANUAL_LMT_FULL_GAIN, gain_index)
+
+    def set_tx_atten_db(self, atten_db, channels=(1,)):
+        """REG_TX{1,2}_ATTEN_0/1: 0.25dB/LSB, 10-bit value split across two
+        registers. atten_db in [0, 89.75]. channels: (1,), (2,) or (1, 2)."""
         code = int(atten_db * 4) & 0x3FF
         # Vendor ad9361_set_tx_atten: the new value only takes effect after
         # the IMMEDIATELY_UPDATE_TPC_ATTEN latch (REG_TX2_DIG_ATTEN bit 6) is
         # cleared before and set after the write.
         self.reg_writef(REG_TX_ATTEN_OFFSET, 1 << 6, 0)   # MASK_CLR_ATTEN_UPDATE
         self.reg_writef(REG_TX2_DIG_ATTEN, 1 << 6, 0)
-        self.reg_write(REG_TX1_ATTEN_0, code & 0xFF)
-        self.reg_writef(REG_TX1_ATTEN_1, 0x3, (code >> 8) & 0x3)
+        if 1 in channels:
+            self.reg_write(REG_TX1_ATTEN_0, code & 0xFF)
+            self.reg_writef(REG_TX1_ATTEN_1, 0x3, (code >> 8) & 0x3)
+        if 2 in channels:
+            self.reg_write(REG_TX2_ATTEN_0, code & 0xFF)
+            self.reg_writef(REG_TX2_ATTEN_1, 0x3, (code >> 8) & 0x3)
         self.reg_writef(REG_TX2_DIG_ATTEN, 1 << 6, 1)
 
     # -- programmable FIR filter -------------------------------------------

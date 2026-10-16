@@ -63,10 +63,10 @@ AXI_DAC_REG_CONFIG = 0x048 + DAC_ADDR_OFFSET
 AXI_DAC_R1_MODE = 1 << 5
 
 
-def axi_ad9361_core_enable(ip, num_channels=1, dac_datarate=1):
+def axi_ad9361_core_enable(ip, num_channels=1, dac_datarate=1, r1_mode=True):
     """dac_datarate = (l_clk / TX sample rate) - 1, written to the DAC
     DATARATE register (byte 0x404C). In R1 mode l_clk = 2 x sample rate, so
-    1. With the reset default of 0 the DAC issues 'valid' every l_clk, the
+    1 (R1) or 3 (R2: l_clk = 4 x fs, r1_mode=False, 4 channels). With the reset default of 0 the DAC issues 'valid' every l_clk, the
     DMA/upack/FIFO path is drained at twice the rate the chip consumes and
     the transmitted tone becomes a 120kHz (fs/32) impulse comb."""
     import time
@@ -77,8 +77,8 @@ def axi_ad9361_core_enable(ip, num_channels=1, dac_datarate=1):
     ip.write(AXI_DAC_REG_RSTN, AXI_DAC_MMCM_RSTN | AXI_DAC_RSTN)
     time.sleep(0.1)
 
-    ip.write(AXI_ADC_REG_CONFIG, AXI_ADC_R1_MODE)
-    ip.write(AXI_DAC_REG_CONFIG, AXI_DAC_R1_MODE)
+    ip.write(AXI_ADC_REG_CONFIG, AXI_ADC_R1_MODE if r1_mode else 0)
+    ip.write(AXI_DAC_REG_CONFIG, AXI_DAC_R1_MODE if r1_mode else 0)
     for ch in range(num_channels):
         ip.write(AXI_ADC_REG_CHAN_CNTRL(ch),
                   AXI_ADC_FORMAT_SIGNEXT | AXI_ADC_FORMAT_ENABLE | AXI_ADC_ENABLE)
