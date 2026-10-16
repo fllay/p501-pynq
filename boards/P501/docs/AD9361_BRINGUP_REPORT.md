@@ -152,8 +152,8 @@ Every tone lands on the commanded frequency **and sign** (I/Q orientation is cor
 | 915 | −1 | −999.8 | 107.4 | 39.2 | 46.9 |
 
 Both LOs lock and the TX quad cal converges at every frequency. At 915 MHz the 50 dB `settle()` target is
-never reached (best ≈ 40–45 dB), so the threshold is LO dependent. Only the 200–1300 MHz RX gain table is
-ported; 2.4 GHz would need the 1.3–4 GHz table.
+never reached (best ≈ 40–45 dB), so the threshold is LO dependent. The 1R1T LO sweep above used the 200–1300 MHz table; all three vendor RX gain tables are now ported (see §5.6 for
+the 100 MHz … 5.8 GHz sweep in 2R2T).
 
 ### 5.3 Sample rates
 
@@ -192,7 +192,7 @@ RX: every setting works except data-delay 0 (DMA timeout), so the default `0x04`
 
 ### 5.6 2R2T (2x2 MIMO) at 3.84 MSPS, 700 MHz LO
 
-Script: `notebooks/ad9361_mimo_test.py`. Worked on the first full attempt once the 2R2T differences were applied:
+Script: `notebooks/ad9361_mimo_test.py` (rate preset as argument, LO list via `LOS=`). Worked on the first full attempt once the 2R2T differences were applied:
 `enable_rx2tx2()`, `R2T2_TIMING` (bit 2) in `PARALLEL_PORT_CONF_1`, `axi_ad9361` R1_MODE bits cleared (ADC + DAC) with four
 channels enabled, **DAC `DATARATE` = 3** (`l_clk = 4·fs`), RX2 gain (`0x10C`) and TX2 attenuation (`0x075/0x076`), and the
 TX quad cal now also requires TX2 convergence (status read from `0x0A8`). DMA word order per sample is `I1, Q1, I2, Q2`.
@@ -211,6 +211,48 @@ not visible to the software), not a gain or register error; verify with matched 
 134.4 dB when overdriven. The random analog state of §6 is **also present in 2R2T but milder**: over 14 ALERT → FDD entries
 TX1→RX1 was 87.2 dB in 11 entries and 80.7–82.0 dB in 3; the other three paths varied by ≈ 1.5–3.5 dB; the digital loopback
 stayed at 132.5 dB on both channels. `settle()` has not yet been extended to 2R2T.
+
+**2R2T LO sweep (3.84 MSPS, `LOS=... ad9361_mimo_test.py 3.84`; TX atten 30 dB, RX gain index 40; dB).** All three vendor RX
+gain tables are now ported (0–1.3 GHz, 1.3–4 GHz, 4–6 GHz; selected from the RX LO), so the sweep covers 100 MHz … 5.8 GHz.
+At every LO both synthesizers lock, the TX quad cal converges for TX1 **and** TX2 (status 3), and the digital loopback keeps
+its channel mapping (isolation 93.3 / 95.5 dB, constant).
+
+| LO (MHz) | TX1→RX1 | TX1→RX2 | TX2→RX1 | TX2→RX2 | floor RX1 / RX2 | verdict |
+|---|---|---|---|---|---|---|
+| 100 | 68.2 | 82.8 | 41.7 | 62.8 | 30.8 / 53.3 | paths present (RX2 floor high) |
+| 200 | 69.5 | 92.0 | 38.6 | 72.5 | 30.5 / 48.7 | paths present (RX2 floor high) |
+| 433 | 79.6 | 89.6 | 45.9 | 69.0 | 30.3 / 46.8 | paths present (RX2 floor high) |
+| 700 | 87.1 | 111.2 | 57.7 | 81.6 | 30.7 / 46.3 | OK |
+| 915 | 82.8 | 112.2 | 56.6 | 89.7 | 30.1 / 38.3 | OK |
+| 1300 | 96.3 | 112.5 | 59.0 | 82.8 | 30.5 / 39.2 | OK |
+| 1800 | 94.4 | 115.0 | 57.9 | 83.8 | 29.5 / 40.6 | OK |
+| 2400 | 99.9 | 102.3 | 72.8 | 86.3 | 31.8 / 46.3 | OK |
+| 3500 | 90.8 | 96.7 | 55.4 | 89.9 | 29.1 / 30.8 | OK |
+| 5000 | 89.9 | 85.4 | 64.4 | 83.5 | 28.7 / 29.3 | OK |
+| 5800 | 85.0 | 99.0 | 43.1 | 87.2 | 27.7 / 28.8 | OK |
+
+("OK" = the strongest TX1 and TX2 paths are ≥ 25 dB above the larger noise floor; the lower-LO rows fail only that
+threshold because RX2's floor is 16–23 dB above RX1's there — most likely ambient pickup on the RX2 antenna at low
+frequency — while the coupling paths themselves are 62–92 dB.)
+
+**2R2T at higher sample rates** (FIR bypassed, `analog_init(rx2tx2=True)`, DAC datarate 3, RF bandwidth 18 / 50 MHz):
+
+| Rate (MSPS) | LO (MHz) | quad | digital-loopback isolation RX1 / RX2 (dB) | TX1→RX1 | TX1→RX2 | TX2→RX1 | TX2→RX2 | floor RX1 / RX2 |
+|---|---|---|---|---|---|---|---|---|
+| 30.72 | 433 | 3 | 96.5 / 93.6 | 97.6 | 101.2 | 76.0 | 86.7 | 73.8 / 74.0 |
+| 30.72 | 700 | 3 | 96.5 / 93.6 | 105.8 | 129.7 | 79.8 | 98.5 | 73.9 / 74.0 |
+| 30.72 | 2400 | 3 | 96.5 / 93.6 | 118.0 | 120.3 | 90.9 | 104.4 | 73.9 / 73.7 |
+| 30.72 | 5800 | 3 | 96.5 / 93.6 | 102.9 | 116.8 | 78.1 | 105.2 | 74.0 / 73.8 |
+| 61.44 | 433 | 3 | 96.6 / 102.7 | 98.9 | 112.1 | 63.1 | 87.6 | 59.3 / 65.5 |
+| 61.44 | 700 | 3 | 95.7 / 102.8 | 99.0 | 131.3 | 78.5 | 100.3 | 59.7 / 70.1 |
+| 61.44 | 2400 | 3 | 95.6 / 103.0 | 117.6 | 118.7 | 90.6 | 103.7 | 59.7 / 61.1 |
+| 61.44 | 5800 | 3 | 95.7 / 103.0 | 102.8 | 116.6 | 62.2 | 104.8 | 59.1 / 59.5 |
+
+At 61.44 MSPS the `l_clk` counter reads `0x27525` = 245.76 MHz = 4·fs as expected (the maximum the AD9361 LVDS interface
+supports, and the FPGA closes it). Unexplained quirk: at **30.72 MSPS 2R2T the counter reads `0x9D49` = 61.44 MHz (2·fs)**
+even though the data path is demonstrably running at 4·fs — a DAC datarate sweep at that setting gives the correct tone
+frequency (3.000 MHz) only for datarate = 3 (0, 1, 2, 4, 7 all give wrong frequencies), as at 3.84 MSPS — so the counter,
+not the data path, looks odd there. Not investigated further.
 
 ---
 
@@ -300,10 +342,10 @@ table), `0x016` calibration control (self-clearing bits).
 | `ad9361_rate_delay_sweep.py` | live LVDS delay-window sweep |
 | `ad9361_lo_sweep_test.py [MHz ...]` | multi-LO tone test |
 | `ad9361_long_tx_test.py [s]` | continuous TX + underflow monitor |
-| `ad9361_mimo_test.py [datarate]` | 2R2T bring-up, digital-loopback channel-mapping check, RF TX1/TX2 → RX1/RX2 |
+| `ad9361_mimo_test.py [3.84\|30.72\|61.44]` (`LOS=MHz,...`) | 2R2T bring-up per LO, digital-loopback channel-mapping check, RF TX1/TX2 → RX1/RX2 matrix |
 | `ad9361_fir_test.py`, `ad9361_fir_isolate.py`, `ad9361_tone_test.py` | older flows (pre-`analog_init`) — kept for history, **stale** |
 | `docs/tools/collect_report_data.py`, `docs/tools/make_figures.py` | regenerate the data and figures of this report |
 
-**Not done / ideas:** libiio comparison (§6); 2R2T at higher rates and `settle()` for 2R2T; 2.4 GHz and above (gain tables); 61.44 MSPS with the FIR enabled;
+**Not done / ideas:** libiio comparison (§6); `settle()` for 2R2T; 1R1T at the new LO range (≥ 1.3 GHz); 61.44 MSPS with the FIR enabled;
 RX quad/DC tracking tuned instead of simply disabled; characterising the ±band-edge rejection and the FIR-bypass noise
 floor; a loopback-based self-test inside the driver so `settle()` is not test-script-only.
