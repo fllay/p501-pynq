@@ -72,6 +72,29 @@ REG_TX_FRACT_BYTE_2 = 0x275
 REG_TX_CP_OVERRANGE_VCO_LOCK = 0x287
 REG_RFPLL_DIVIDERS = 0x005
 
+# -- programmable FIR filter (128 taps max, RX decimation / TX
+# interpolation) -- TX block at 0x060-0x065, RX block at an identical
+# layout offset by RX_TX_FILTER_OFFSET (0x90), per ad9361_load_fir_filter_coef.
+REG_TX_FILTER_COEF_ADDR = 0x060
+REG_TX_FILTER_COEF_WRITE_DATA_1 = 0x061
+REG_TX_FILTER_COEF_WRITE_DATA_2 = 0x062
+REG_TX_FILTER_COEF_READ_DATA_1 = 0x063
+REG_TX_FILTER_COEF_READ_DATA_2 = 0x064
+REG_TX_FILTER_CONF = 0x065
+REG_RX_FILTER_COEF_ADDR = 0x0F0
+REG_RX_FILTER_GAIN = 0x0F6
+RX_TX_FILTER_OFFSET = REG_RX_FILTER_COEF_ADDR - REG_TX_FILTER_COEF_ADDR
+
+TX_FIR_GAIN_6DB = 1 << 0
+FIR_START_CLK = 1 << 1
+FIR_WRITE = 1 << 2
+FIR_SELECT = lambda x: (x & 0x3) << 3
+FIR_NUM_TAPS = lambda x: (x & 0x7) << 5
+
+FIR_IS_RX = 0x80
+FIR_TX1 = 0x01
+FIR_RX1 = 0x81
+
 TX_RX_VCO_OFFSET = REG_TX_VCO_OUTPUT - REG_RX_VCO_OUTPUT  # applies to the
 # whole REG_RX_* block above -- TX uses the same offset relative to each one
 
@@ -198,6 +221,18 @@ class AD9361:
 
     @staticmethod
     def _release_control_gpios():
+        """CONTROL_GPIOS[0] (640) is AD9361's RESETB (active-low hardware
+        reset). Every previous session only ever drove it high -- fine
+        when the chip was already coming from a true power-on state, but
+        never actually forces a clean reset if the GPIO was already high
+        from a prior boot/driver (e.g. after swapping to a different,
+        more complete driver like libiio and back -- found 2026-10-17
+        when a stale clock-generation state survived an SD-card swap +
+        full reboot, producing a frozen RX capture with CLK_FREQ reading
+        ~5kHz instead of tens of MHz despite every SPI-side lock/status
+        bit reporting success). Now explicitly pulses RESETB low then
+        high for a real, deterministic reset every time, instead of
+        relying on whatever state the line happened to already be in."""
         for g in CONTROL_GPIOS:
             path = f"/sys/class/gpio/gpio{g}"
             if not os.path.exists(path):
@@ -208,6 +243,12 @@ class AD9361:
             path = f"/sys/class/gpio/gpio{g}"
             with open(f"{path}/direction", "w") as f:
                 f.write("out")
+        reset_gpio = CONTROL_GPIOS[0]
+        with open(f"/sys/class/gpio/gpio{reset_gpio}/value", "w") as f:
+            f.write("0")
+        time.sleep(0.01)
+        for g in CONTROL_GPIOS:
+            path = f"/sys/class/gpio/gpio{g}"
             with open(f"{path}/value", "w") as f:
                 f.write("1")
         time.sleep(0.2)
@@ -482,6 +523,81 @@ class AD9361:
         code = int(atten_db * 4) & 0x3FF
         self.reg_write(REG_TX1_ATTEN_0, code & 0xFF)
         self.reg_writef(REG_TX1_ATTEN_1, 0x3, (code >> 8) & 0x3)
+
+    # -- programmable FIR filter -------------------------------------------
+    def load_fir_filter_coef(self, dest, gain_db, coef):
+        """Port of ad9361_load_fir_filter_coef -- loads the AD9361's
+        programmable RX/TX FIR filter taps over SPI. Never implemented
+        before this session: identified early in the fs/3-artifact
+        investigation (AD9361_FS3_INVESTIGATION.md) as a real gap, since
+        the chip never actually has real filter coefficients without
+        this -- only the bypass/decimation-enable bits were ever set.
+
+        dest: FIR_RX1 or FIR_TX1. coef: list of int16 tap values (length
+        16-128, multiple of 16). gain_db: RX supports -12/-6/0/+6dB via
+        REG_RX_FILTER_GAIN (same formula as the reference driver); TX
+        only has a single -6dB bit (TX_FIR_GAIN_6DB) -- anything else is
+        treated as 0dB.
+
+        Unlike the reference driver, this does not save/restore the
+        FIR-enable/decimation field in REG_RX/TX_ENABLE_FILTER_CTRL --
+        this project always runs one fixed, known clock-chain
+        configuration, so the caller must already have set that field
+        via set_clock_chain() (e.g. rx_fir_div=2) before calling this."""
+        ntaps = len(coef)
+        assert coef and ntaps <= 128 and ntaps % 16 == 0, \
+            f"ntaps must be 1-128 and a multiple of 16, got {ntaps}"
+
+        self.reg_write(REG_ENSM_CONFIG_1, TO_ALERT | FORCE_ALERT_STATE)
+
+        is_rx = bool(dest & FIR_IS_RX)
+        offs = RX_TX_FILTER_OFFSET if is_rx else 0
+        fir_conf = 0
+
+        if is_rx:
+            gain_field = 3 - (gain_db + 12) // 6
+            self.reg_write(REG_RX_FILTER_GAIN, gain_field & 0x3)
+        elif gain_db == -6:
+            fir_conf = TX_FIR_GAIN_6DB
+
+        fir_conf |= FIR_NUM_TAPS(ntaps // 16 - 1) | FIR_SELECT(dest) | FIR_START_CLK
+
+        self.reg_write(REG_TX_FILTER_CONF + offs, fir_conf)
+        for i, c in enumerate(coef):
+            c16 = c & 0xFFFF
+            self.reg_write(REG_TX_FILTER_COEF_ADDR + offs, i)
+            self.reg_write(REG_TX_FILTER_COEF_WRITE_DATA_1 + offs, c16 & 0xFF)
+            self.reg_write(REG_TX_FILTER_COEF_WRITE_DATA_2 + offs, (c16 >> 8) & 0xFF)
+            self.reg_write(REG_TX_FILTER_CONF + offs, fir_conf | FIR_WRITE)
+            # Dummy writes to delay ~1us for the FIR's internal write
+            # strobe to settle, matching the reference driver exactly.
+            self.reg_write(REG_TX_FILTER_COEF_READ_DATA_2 + offs, 0)
+            self.reg_write(REG_TX_FILTER_COEF_READ_DATA_2 + offs, 0)
+
+        self.reg_write(REG_TX_FILTER_CONF + offs, fir_conf)
+        fir_conf &= ~FIR_START_CLK
+        self.reg_write(REG_TX_FILTER_CONF + offs, fir_conf)
+
+        self.enable_fdd()
+
+    def verify_fir_filter_coef(self, dest, coef):
+        """Diagnostic only: read back loaded taps, return a list of
+        (index, expected, actual) mismatches (empty = all taps verified)."""
+        ntaps = len(coef)
+        is_rx = bool(dest & FIR_IS_RX)
+        offs = RX_TX_FILTER_OFFSET if is_rx else 0
+        conf = FIR_NUM_TAPS(ntaps // 16 - 1) | FIR_SELECT(dest) | FIR_START_CLK
+        self.reg_write(REG_TX_FILTER_CONF + offs, conf)
+        mismatches = []
+        for i, expected in enumerate(coef):
+            self.reg_write(REG_TX_FILTER_COEF_ADDR + offs, i)
+            lo = self.reg_read(REG_TX_FILTER_COEF_READ_DATA_1 + offs)
+            hi = self.reg_read(REG_TX_FILTER_COEF_READ_DATA_2 + offs)
+            val = lo | (hi << 8)
+            if val != (expected & 0xFFFF):
+                mismatches.append((i, expected & 0xFFFF, val))
+        self.reg_write(REG_TX_FILTER_CONF + offs, conf & ~FIR_START_CLK)
+        return mismatches
 
 
 if __name__ == "__main__":
