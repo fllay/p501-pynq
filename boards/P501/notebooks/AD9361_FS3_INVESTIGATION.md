@@ -84,31 +84,72 @@ symmetric spur appears at exactly **±20.48MHz** (154dB), about 88dB
 *above* the real transmitted 1MHz tone's peak (66dB) in the same capture.
 20.48MHz is also exactly `BBPLL/48`.
 
+## RESOLVED (partially): libiio comparison proves this is a software gap, not hardware
+
+**2026-10-16**: booted the same physical board into the original `p501_iio`
+PetaLinux image (ADI kernel driver + libiio, `analog`/`analog` login,
+hostname `p501iio`, kernel `6.1.70adi-v2023.2`) and ran an equivalent
+TX-tone/RX-capture test using `iio_attr`/`iio_readdev` against the real
+`ad9361-phy`/`cf-ad9361-lpc`/`cf-ad9361-dds-core-lpc` IIO devices (RX/TX
+LO=700MHz, sampling_frequency=3.84MHz, RX manual gain, TX1 DDS tone at
+~1MHz via `altvoltage0`/`altvoltage2` scale=1.0).
+
+A TX-on vs TX-off A/B comparison (32768 samples each) is conclusive:
+- RX amplitude jumped 25× when TX turned on (I std 45.7 → 1167.4) —
+  real over-the-air coupling confirmed, antennas and RF front end work.
+- **The real +1MHz tone is the single dominant peak in the whole
+  spectrum (138.5 dB)** — correctly placed.
+- The fs/3-area bin (~1280kHz) *also* rose somewhat under TX-on (81.3 →
+  122.5 dB) — so some genuine fs/3-ish artifact/harmonic does exist on
+  this hardware even under the vendor's proven driver — but it's **16 dB
+  weaker than the real tone**, a minor secondary effect, not dominant.
+
+**This resolves the (a)/(b) ambiguity in favor of (a): hardware and RF
+front end are fine; this project's hand-rolled register driver is still
+missing something that lets the same underlying fs/3-ish artifact
+*dominate* instead of staying a minor secondary effect.** Two concrete,
+still-unimplemented candidates, both previously identified but not yet
+built: **RX/TX quadrature calibration** (`RX_QUAD_CAL`/`TX_QUAD_CAL` in
+`REG_CALIBRATION_CTRL` — only DC-offset calibration, `BBDC_CAL`/
+`RFDC_CAL`, was ever implemented and tested; quadrature imbalance
+specifically causes image/sideband leakage of the kind that could
+explain why a minor artifact becomes dominant without it) and **real
+AD9361 FIR coefficient loading** (`ad9361_load_fir_filter_coef()` was
+never ported — only FIR bypass-vs-default-enabled was tested, never
+loading real filter taps).
+
+Script: `/tmp/libiio_ab_test.py` (scratch, not persisted in this repo —
+recreate from this description if needed: configures via `iio_attr`,
+captures via `iio_readdev -b N -s N`, SFTPs the raw `.bin` back, FFTs
+locally with numpy). Needs `sudo` on the board (password `analog`) for
+both `iio_attr` writes and `iio_readdev`'s buffer allocation.
+
 ## Where this leaves it
 
-Every register-level knob this project's hand-rolled driver exposes has
-been tried and ruled out — five independent subsystems, 550+ tested
-register settings, zero effect on any of them. That is not consistent
-with a simple mistuned parameter. Two remaining explanations:
+Confirmed hardware/RF-path is fine (libiio comparison above). The
+remaining gap is specifically in this project's hand-rolled register
+driver — every *decimation/timing/gain* knob was ruled out before the
+libiio comparison, which then separately ruled out hardware, leaving
+**calibration/filtering completeness** as the likely remaining area:
 
-- **(a)** A fixed test-pattern or unintended multiplexer default baked
-  into the bitstream at a level below any AXI-Lite or SPI register this
-  driver controls (a Vivado block-design wiring choice, a debug core, or
-  similar) — would need Vivado/ILA-level inspection to find.
-- **(b)** A real hardware fault on this specific board's RX/LVDS path.
+- **RX/TX quadrature calibration** — never implemented (only DC-offset
+  calibration was). `ad9361_tx_quad_calib()` in no-OS's `ad9361.c` is
+  the reference; it's substantially more involved than the DC-offset
+  calibration already ported (needs an internal TX test-tone injection
+  and iterative phase/gain correction search), which is likely why it
+  was deferred earlier in this investigation.
+- **Real AD9361 FIR filter coefficient loading** — `ad9361_load_fir_filter_coef()`
+  was identified early in this investigation as a real gap (128-tap
+  programmable FIR, never loaded) but set aside after a bypass test
+  showed the fs/3 artifact persisting identically with FIR enabled vs.
+  fully bypassed. That test only proved FIR *presence* doesn't change
+  the *dominant* artifact — it doesn't rule out FIR coefficients
+  affecting the *relative* strength of the real tone vs. the
+  secondary fs/3-ish effect, which is the actual open question now.
 
-**Next planned step**: boot the same physical board into the original
-`p501_iio` PetaLinux image (ADI kernel driver + libiio, already proven
-working for AD9361 register/control-plane access via the USB gadget —
-see the main project history) and run an equivalent TX-tone/RX-capture
-test using `iio_writedev`/`iio_readdev` or GNU Radio's `gr-iio`. If the
-vendor's own fully-validated stack produces a clean result on the same
-silicon, that proves (a) — a remaining gap in this hand-rolled driver. If
-it *also* shows the fs/3 artifact, that points to (b) — board hardware.
-
-Needs a physical SD card swap (or DIP-switch boot-mode change to the
-vendor factory firmware on eMMC) — not something that can be done over
-SSH, since it changes which OS boots.
+Next step: implement one or both and re-run the TX-tone/RX-capture test
+on this project's own driver (`ad9361_tone_test.py`) to check whether
+the real 1MHz tone becomes dominant, matching the libiio result.
 
 ## Scripts (all in this directory)
 

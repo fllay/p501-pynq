@@ -41,11 +41,18 @@ for the full writeup. Short version: the FFT peak of a captured signal
 lands at exactly 1/3 of whatever sample rate is configured, regardless of
 decimation settings, RX gain, TX attenuation, both available digital-
 interface delay-tuning mechanisms (full range swept on each), or RX/TX
-DC-offset calibration — none of which had any effect. Next step planned:
-compare against the vendor's own proven kernel/libiio stack
-([fllay/puzi501iio](https://github.com/fllay/puzi501iio)) on the same
-board to determine whether this is a remaining gap in this project's
-hand-rolled register driver or a real hardware issue.
+DC-offset calibration — none of which had any effect.
+
+**Confirmed NOT a hardware issue (2026-10-16)**: booted the same board
+into the original `p501_iio` PetaLinux image (ADI kernel driver +
+libiio) and ran an equivalent TX-tone/RX-capture test. There, the real
++1MHz tone is the dominant peak in the spectrum, with only a minor (16dB
+weaker) fs/3-ish secondary effect — not the dominant artifact this
+project's own driver produces. The RF front end and antennas are fine;
+this project's hand-rolled driver is still missing something, most
+likely RX/TX quadrature calibration (never implemented, only DC-offset
+calibration was) and/or real AD9361 FIR coefficient loading (never
+ported). See the investigation doc for details and next steps.
 
 Not yet done: RX/TX quadrature calibration (distinct from the DC-offset
 calibration above, which *was* tried), AGC, full 2T2R mode (this project
