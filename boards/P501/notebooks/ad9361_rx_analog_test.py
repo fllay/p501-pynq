@@ -30,11 +30,10 @@ def main():
         assert ad.set_rx_lo_freq(700_000_000), "RX LO did not lock"
         assert ad.set_tx_lo_freq(700_000_000), "TX LO did not lock"
 
-        cal_ok = ad.rx_analog_init()
-        print(f"RX analog init: BB filter cal done={cal_ok}, "
-              f"rxbbf_div={ad.rxbbf_div}, "
-              f"C3=0x{ad.reg_read(0x1EB):02X}/0x{ad.reg_read(0x1EC):02X} "
-              f"R2346=0x{ad.reg_read(0x1E6):02X}")
+        res = ad.analog_init()
+        print(f"analog init: {res} (tx_quad 3 = LO leakage + sideband both converged), "
+              f"quad_phase={getattr(ad, 'last_tx_quad_cal_phase', None)}, "
+              f"rxbbf_div={ad.rxbbf_div}")
 
         fb.axi_ad9361_core_enable(ol.axi_ad9361, num_channels=2)
         ad.reg_write(fb.REG_PARALLEL_PORT_CONF_1, fb.PP_CONF_1)

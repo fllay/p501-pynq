@@ -72,6 +72,7 @@ REG_TX_VCO_OUTPUT = 0x27A
 REG_TX_FRACT_BYTE_2 = 0x275
 REG_TX_CP_OVERRANGE_VCO_LOCK = 0x287
 REG_RFPLL_DIVIDERS = 0x005
+REG_REFERENCE_CLOCK_CYCLES = 0x03A
 
 # -- programmable FIR filter (128 taps max, RX decimation / TX
 # interpolation) -- TX block at 0x060-0x065, RX block at an identical
@@ -272,6 +273,45 @@ RX_GAIN_TABLE_200_1300MHZ = [
 ]
 
 
+REG_TX_BBF_TUNE_DIVIDER = 0x0D6
+REG_TX_BBF_TUNE_MODE = 0x0D7
+REG_TX_TUNE_CTRL = 0x0CA
+TX_BB_TUNE_CAL = 1 << 6
+TUNER_RESAMPLE = 1 << 1
+TX_TUNE_CTRL_1 = 1 << 5          # TUNE_CTRL(1)
+TX_PD_TUNE = 1 << 2
+REG_CONFIG0 = 0x0D0
+REG_RESISTOR = 0x0D1
+REG_CAPACITOR = 0x0D2
+REG_BB_DC_OFFSET_COUNT = 0x193
+REG_BB_DC_OFFSET_SHIFT = 0x190
+REG_BB_DC_OFFSET_ATTEN = 0x194
+BBDC_CAL = 1 << 0
+RFDC_CAL = 1 << 1
+TX_QUAD_CAL = 1 << 4
+REG_WAIT_COUNT = 0x185
+REG_RF_DC_OFFSET_COUNT = 0x186
+REG_RF_DC_OFFSET_CONFIG_1 = 0x187
+REG_RF_DC_OFFSET_ATTEN = 0x188
+REG_INVERT_BITS = 0x189
+REG_DC_OFFSET_CONFIG2 = 0x18B
+USE_WAIT_COUNTER_FOR_RF_DC_INIT_CAL = 1 << 7
+INVERT_RX1_RF_DC_CGOUT_WORD = 1 << 4
+INVERT_RX2_RF_DC_CGOUT_WORD = 1 << 5
+REG_QUAD_CAL_NCO_FREQ_PHASE_OFFSET = 0x0A0
+REG_QUAD_CAL_CTRL = 0x0A1
+REG_KEXP_1 = 0x0A2
+REG_KEXP_2 = 0x0A3
+REG_QUAD_SETTLE_COUNT = 0x0A4
+REG_MAG_FTEST_THRESH = 0x0A5
+REG_MAG_FTEST_THRESH_2 = 0x0A6
+REG_QUAD_CAL_STATUS_TX1 = 0x0A7
+REG_QUAD_CAL_COUNT = 0x0A9
+REG_TX_QUAD_FULL_LMT_GAIN = 0x0AA
+REG_TX_QUAD_LPF_GAIN = 0x0AE
+TX1_LO_CONV = 1 << 1
+TX1_SSB_CONV = 1 << 0
+
 def div_round_closest(a, b):
     return (a + b // 2) // b
 
@@ -401,6 +441,11 @@ class AD9361:
         # programming.
         self.reg_writef(REG_RX_PFD_CONFIG, BYPASS_LD_SYNTH, 0)
         self.reg_writef(REG_TX_PFD_CONFIG, BYPASS_LD_SYNTH, 0)
+        # Calibration/ENSM delay counters are in reference-clock cycles per
+        # microsecond; the vendor driver programs this in ad9361_setup()
+        # (ad9361_set_ref_clk_cycles) before any calibration.
+        self.reg_write(REG_REFERENCE_CLOCK_CYCLES,
+                       ((self.ref_clk_hz // 1_000_000) - 1) & 0x7F)
 
     # -- BBPLL -----------------------------------------------------------
     def set_bbpll_rate(self, rate_hz):
@@ -707,7 +752,10 @@ class AD9361:
         self.reg_write(REG_MAX_LMT_FULL_GAIN, len(tab) - 1)
         sel = (dest & 0x3) << 3
         self.reg_write(REG_GAIN_TABLE_CONFIG, START_GAIN_TABLE_CLOCK | sel)
+        self.tx_quad_lpf_tia_match = -1
         for i, (d1, d2, d3) in enumerate(tab):
+            if (d2 & 0x3F) == 0x20:
+                self.tx_quad_lpf_tia_match = i
             self.reg_write(REG_GAIN_TABLE_ADDRESS, i)
             self.reg_write(REG_GAIN_TABLE_WRITE_DATA1, d1)
             self.reg_write(REG_GAIN_TABLE_WRITE_DATA2, d2)
@@ -753,6 +801,206 @@ class AD9361:
         self.rx_tia_calib(bb_bw)
         self.rx_adc_setup(bbpll_hz, adc_clk_hz)
         return ok
+
+    # -- TX analog bring-up + calibrations (ports of the vendor driver) -----
+    def run_calibration(self, mask):
+        self.reg_write(REG_CALIBRATION_CTRL, mask)
+        return self.check_cal_done(REG_CALIBRATION_CTRL, mask, 0)
+
+    def tx_bb_analog_filter_calib(self, tx_bb_bw_hz, bbpll_hz):
+        """Port of ad9361_tx_bb_analog_filter_calib (tx_bb_bw = RF bw / 2)."""
+        tx_bb_bw_hz = max(625_000, min(20_000_000, tx_bb_bw_hz))
+        target = 145036 * (tx_bb_bw_hz // 10000)
+        div = min(511, -(-bbpll_hz // target))
+        self.reg_write(REG_TX_BBF_TUNE_DIVIDER, div & 0xFF)
+        self.reg_writef(REG_TX_BBF_TUNE_MODE, 1 << 0, div >> 8)
+        self.reg_write(REG_TX_TUNE_CTRL, TUNER_RESAMPLE | TX_TUNE_CTRL_1)
+        ok = self.run_calibration(TX_BB_TUNE_CAL)
+        self.reg_write(REG_TX_TUNE_CTRL,
+                       TUNER_RESAMPLE | TX_TUNE_CTRL_1 | TX_PD_TUNE)
+        return ok
+
+    def tx_bb_second_filter_calib(self, tx_bb_bw_hz):
+        """Port of ad9361_tx_bb_second_filter_calib."""
+        M64 = (1 << 64) - 1
+        tx_bb_bw_hz = max(530_000, min(20_000_000, tx_bb_bw_hz))
+        corner = 15708 * (tx_bb_bw_hz // 10000)
+        res = 1
+        cap = 0
+        for _ in range(4):
+            div = corner * res
+            cap = ((500_000_000 + (div >> 1)) // div - 12) & M64
+            if cap < 64:
+                break
+            res <<= 1
+        if cap > 63:
+            cap = 63
+        if tx_bb_bw_hz <= 4_500_000:
+            reg_conf = 0x59
+        elif tx_bb_bw_hz <= 12_000_000:
+            reg_conf = 0x56
+        else:
+            reg_conf = 0x57
+        reg_res = {1: 0x0C, 2: 0x04, 4: 0x03, 8: 0x01}.get(res, 0x01)
+        self.reg_write(REG_CONFIG0, reg_conf)
+        self.reg_write(REG_RESISTOR, reg_res)
+        self.reg_write(REG_CAPACITOR, cap & 0xFF)
+
+    def bb_dc_offset_calib(self):
+        """Port of ad9361_bb_dc_offset_calib."""
+        self.reg_write(REG_BB_DC_OFFSET_COUNT, 0x3F)
+        self.reg_write(REG_BB_DC_OFFSET_SHIFT, 0xF)
+        self.reg_write(REG_BB_DC_OFFSET_ATTEN, 1)
+        return self.run_calibration(BBDC_CAL)
+
+    def rf_dc_offset_calib(self, rx_freq_hz, rx2_phase_inverted=False):
+        """Port of ad9361_rf_dc_offset_calib using the vendor/no-OS default
+        platform data (count low/high = 0x32/0x28, attenuation low/high = 5/6)."""
+        self.reg_write(REG_WAIT_COUNT, 0x20)
+        if rx_freq_hz <= 4_000_000_000:
+            self.reg_write(REG_RF_DC_OFFSET_COUNT, 0x32)
+            self.reg_write(REG_RF_DC_OFFSET_CONFIG_1, 4 | (2 << 4))
+            self.reg_write(REG_RF_DC_OFFSET_ATTEN, 5)
+        else:
+            self.reg_write(REG_RF_DC_OFFSET_COUNT, 0x28)
+            self.reg_write(REG_RF_DC_OFFSET_CONFIG_1, 4 | (3 << 4))
+            self.reg_write(REG_RF_DC_OFFSET_ATTEN, 6)
+        self.reg_write(REG_DC_OFFSET_CONFIG2,
+                       USE_WAIT_COUNTER_FOR_RF_DC_INIT_CAL | 3)
+        inv = INVERT_RX1_RF_DC_CGOUT_WORD
+        if not rx2_phase_inverted:
+            inv |= INVERT_RX2_RF_DC_CGOUT_WORD
+        self.reg_write(REG_INVERT_BITS, inv)
+        return self.run_calibration(RFDC_CAL)
+
+    def _tx_quad_calib_once(self, phase, rxnco_word, decim):
+        self.reg_write(REG_QUAD_CAL_NCO_FREQ_PHASE_OFFSET,
+                       ((rxnco_word & 0x3) << 5) | (phase & 0x1F))
+        base = (1 << 6) | (1 << 5) | (1 << 4) | (1 << 3) | (decim & 0x3)
+        self.reg_write(REG_QUAD_CAL_CTRL, base | (1 << 2))  # + soft reset
+        self.reg_write(REG_QUAD_CAL_CTRL, base)
+        if not self.run_calibration(TX_QUAD_CAL):
+            return None
+        return self.reg_read(REG_QUAD_CAL_STATUS_TX1) & (TX1_LO_CONV | TX1_SSB_CONV)
+
+    def tx_quad_calib(self, bw_rx_hz, bw_tx_hz, rx_phase=-1,
+                      clkrf_hz=7_680_000, clktf_hz=7_680_000):
+        """Port of ad9361_tx_quad_calib for the RX1/TX1 (1R1T) case with
+        no RX2 phase inversion. bw_* are single-sided bandwidths (RF bw/2);
+        clkrf/clktf are the RX/TX baseband clocks of the configured chain.
+        Returns the final (LO_CONV|SSB_CONV) status bits (3 = both converged)."""
+        assert self.tx_quad_lpf_tia_match >= 0, "load_rx_gain_table() first"
+        txnco_word = div_round_closest(bw_tx_hz * 8, clktf_hz) - 1
+        txnco_word = max(0, min(3, txnco_word))
+        rxnco_word = txnco_word
+        decim = 2 if clktf_hz <= 4_000_000 else 3
+        _rx_phase = 0
+
+        if clkrf_hz // 2 == clktf_hz:
+            _rx_phase = 0x0E
+            if txnco_word == 0:
+                txnco_word += 1
+            elif txnco_word == 1:
+                rxnco_word -= 1
+            elif txnco_word == 2:
+                rxnco_word -= 2
+                txnco_word -= 1
+            elif txnco_word == 3:
+                rxnco_word -= 2
+                _rx_phase = 0x08
+        elif clkrf_hz == clktf_hz:
+            if txnco_word in (0, 3):
+                _rx_phase = 0x15
+            elif txnco_word == 2:
+                _rx_phase = 0x1F
+            else:
+                if self.reg_readf(REG_TX_ENABLE_FILTER_CTRL, 0x3F) == 0x22:
+                    _rx_phase = 0x15
+                else:
+                    _rx_phase = 0x1A
+        elif clktf_hz // 2 == clkrf_hz:
+            _rx_phase = (-2) & 0xFF
+            if txnco_word == 0:
+                rxnco_word = 1
+            else:
+                txnco_word, rxnco_word = 1, 3
+        elif clktf_hz // 4 == clkrf_hz:
+            _rx_phase = (-2) & 0xFF
+            txnco_word, rxnco_word = 0, 3
+        elif clkrf_hz // 4 == clktf_hz:
+            _rx_phase = (-2) & 0xFF
+            txnco_word, rxnco_word = 3, 0
+        else:
+            raise ValueError(f"unhandled clkrf={clkrf_hz} clktf={clktf_hz}")
+
+        if rx_phase >= 0:
+            _rx_phase = rx_phase
+
+        txnco_freq = clktf_hz * (txnco_word + 1) // 32
+        assert txnco_freq <= bw_rx_hz // 4 and txnco_freq <= bw_tx_hz // 4, \
+            "bandwidth too narrow for TX quad cal (vendor path re-tunes RF bw)"
+
+        self.reg_writef(REG_KEXP_2, 0x3 << 6, txnco_word)
+        self.reg_write(REG_QUAD_CAL_COUNT, 0xFF)
+        self.reg_write(REG_KEXP_1, (1 << 6) | (3 << 4) | (3 << 2) | 3)
+        self.reg_write(REG_MAG_FTEST_THRESH, 0x03)
+        self.reg_write(REG_MAG_FTEST_THRESH_2, 0x03)
+        self.reg_write(REG_TX_QUAD_FULL_LMT_GAIN, self.tx_quad_lpf_tia_match)
+        self.reg_write(REG_QUAD_SETTLE_COUNT, 0xF0)
+        self.reg_write(REG_TX_QUAD_LPF_GAIN, 0x00)
+
+        want = TX1_LO_CONV | TX1_SSB_CONV
+        val = 0
+        if rx_phase != -2:
+            val = self._tx_quad_calib_once(_rx_phase, rxnco_word, decim)
+            if val != want and getattr(self, "last_tx_quad_cal_phase", 0x7FFFFFFF) < 31:
+                val = self._tx_quad_calib_once(self.last_tx_quad_cal_phase,
+                                               rxnco_word, decim)
+            elif val == want:
+                self.last_tx_quad_cal_phase = _rx_phase
+        if val != want:
+            field = [0] * 64
+            for i in range(32):
+                v = self._tx_quad_calib_once(i, rxnco_word, decim) or 0
+                field[i] = field[i + 32] = int(not ((v & TX1_LO_CONV) and (v & TX1_SSB_CONV)))
+            best_len, best_start, cnt, start = 0, 0, 0, -1
+            for i, f in enumerate(field):
+                if f == 0:
+                    if start == -1:
+                        start = i
+                    cnt += 1
+                else:
+                    if cnt > best_len:
+                        best_len, best_start = cnt, start
+                    start, cnt = -1, 0
+            if cnt > best_len:
+                best_len, best_start = cnt, start
+            self.last_tx_quad_cal_phase = (best_start + best_len // 2) & 0x1F
+            val = self._tx_quad_calib_once(self.last_tx_quad_cal_phase,
+                                           rxnco_word, decim)
+        return val
+
+    def analog_init(self, rf_rx_bw_hz=4_000_000, rf_tx_bw_hz=4_000_000,
+                    bbpll_hz=983_040_000, adc_clk_hz=61_440_000,
+                    rx_freq_hz=700_000_000, rx_input=0):
+        """Full RX+TX analog bring-up in the vendor ad9361_setup() order
+        (gain control, filter/TIA/ADC setup, DC-offset cals, TX quad cal).
+        Call after both LOs are locked, with ENSM still in ALERT. Returns a
+        dict of per-step results."""
+        rx_bb, tx_bb = rf_rx_bw_hz // 2, rf_tx_bw_hz // 2
+        self.rf_port_setup(rx_input)
+        self.gain_control_manual()
+        self.load_rx_gain_table()
+        r = {}
+        r["rx_bb_filter"] = self.rx_bb_analog_filter_calib(rx_bb, bbpll_hz)
+        r["tx_bb_filter"] = self.tx_bb_analog_filter_calib(tx_bb, bbpll_hz)
+        self.rx_tia_calib(rx_bb)
+        self.tx_bb_second_filter_calib(tx_bb)
+        self.rx_adc_setup(bbpll_hz, adc_clk_hz)
+        r["bb_dc"] = self.bb_dc_offset_calib()
+        r["rf_dc"] = self.rf_dc_offset_calib(rx_freq_hz)
+        r["tx_quad"] = self.tx_quad_calib(rx_bb, tx_bb)
+        return r
 
     # -- ENSM / gain -------------------------------------------------------
     def enable_rx1_tx1(self):
