@@ -109,6 +109,7 @@ REG_TIA2_C_MSB = 0x1DF
 REG_RX1_TUNE_CTRL = 0x1E2
 REG_RX2_TUNE_CTRL = 0x1E3
 REG_RX_BBF_R2346 = 0x1E6
+REG_TX_SYMBOL_ATTEN_CONFIG = 0x081
 REG_RX_BBF_C3_MSB = 0x1EB
 REG_RX_BBF_C3_LSB = 0x1EC
 REG_RX_BBF_TUNE_DIVIDE = 0x1F8
@@ -339,6 +340,20 @@ GM_ST_CTRL = [0x0, 0xD, 0x15, 0x1B, 0x21, 0x25, 0x29, 0x2C,
               0x2F, 0x31, 0x33, 0x34, 0x35, 0x3A, 0x3D, 0x3E]
 GM_ST_GAIN = [0x78, 0x74, 0x70, 0x6C, 0x68, 0x64, 0x60, 0x5C,
               0x58, 0x54, 0x50, 0x4C, 0x48, 0x30, 0x18, 0x0]
+
+REG_CALIBRATION_CONFIG_1 = 0x169
+REG_CALIBRATION_CONFIG_2 = 0x16A
+REG_CALIBRATION_CONFIG_3 = 0x16B
+REG_RX_QUAD_GAIN2 = 0x16F
+ENABLE_PHASE_CORR = 1 << 7
+ENABLE_GAIN_CORR = 1 << 6
+FREE_RUN_MODE = 1 << 3
+ENABLE_CORR_WORD_DECIMATION = 1 << 2
+ENABLE_TRACKING_MODE_CH1 = 1 << 0
+CALIBRATION_CONFIG2_DFLT = 0x3 << 5
+PREVENT_POS_LOOP_GAIN = 1 << 7
+ENABLE_BB_DC_OFFSET_TRACKING = 1 << 5
+ENABLE_RF_OFFSET_TRACKING = 1 << 3
 
 def div_round_closest(a, b):
     return (a + b // 2) // b
@@ -819,6 +834,8 @@ class AD9361:
                        DEC_PWR_FOR_LOW_PWR)
         self.reg_write(REG_RX1_MANUAL_DIGITALFORCED_GAIN, 0)
         self.reg_write(REG_RX2_MANUAL_DIGITALFORCED_GAIN, 0)
+        # vendor gc_setup: "Tx Symbol Gain Control" off (TPC symbol attenuation)
+        self.reg_write(REG_TX_SYMBOL_ATTEN_CONFIG, 0x00)
 
     def rx_analog_init(self, rf_bandwidth_hz=4_000_000, bbpll_hz=983_040_000,
                        adc_clk_hz=61_440_000, rx_input=0):
@@ -1011,6 +1028,25 @@ class AD9361:
                                            rxnco_word, decim)
         return val
 
+    def tracking_control(self, bbdc=True, rfdc=True, quad=True,
+                         dc_offset_update_events=5):
+        """Port of ad9361_tracking_control (RX1 only). The vendor driver
+        enables all three trackers by default and always writes this config at
+        the end of ad9361_setup(); without it the tracking controller runs
+        from power-on defaults."""
+        self.reg_write(REG_CALIBRATION_CONFIG_2, CALIBRATION_CONFIG2_DFLT | 0x15)
+        self.reg_write(REG_CALIBRATION_CONFIG_3, PREVENT_POS_LOOP_GAIN | 0x15)
+        self.reg_write(REG_DC_OFFSET_CONFIG2,
+                       USE_WAIT_COUNTER_FOR_RF_DC_INIT_CAL |
+                       (dc_offset_update_events & 0x7) |
+                       (ENABLE_BB_DC_OFFSET_TRACKING if bbdc else 0) |
+                       (ENABLE_RF_OFFSET_TRACKING if rfdc else 0))
+        self.reg_writef(REG_RX_QUAD_GAIN2, 0x7 << 5, 0)  # not slow mode
+        self.reg_write(REG_CALIBRATION_CONFIG_1,
+                       ENABLE_PHASE_CORR | ENABLE_GAIN_CORR | FREE_RUN_MODE |
+                       ENABLE_CORR_WORD_DECIMATION |
+                       (ENABLE_TRACKING_MODE_CH1 if quad else 0))
+
     def synth_cp_calib(self, tx, ref_clk_hz=None):
         """Port of ad9361_txrx_synth_cp_calib (FDD). Vendor order: run for
         RX then TX BEFORE programming the corresponding LO frequency."""
@@ -1053,7 +1089,7 @@ class AD9361:
     def analog_init(self, rf_rx_bw_hz=4_000_000, rf_tx_bw_hz=4_000_000,
                     bbpll_hz=983_040_000, adc_clk_hz=61_440_000,
                     rx_freq_hz=700_000_000, rx_input=0,
-                    clkrf_hz=7_680_000, clktf_hz=7_680_000):
+                    clkrf_hz=7_680_000, clktf_hz=7_680_000, tracking=False):
         """Full RX+TX analog bring-up in the vendor ad9361_setup() order
         (gain control, filter/TIA/ADC setup, DC-offset cals, TX quad cal).
         Call after both LOs are locked, with ENSM still in ALERT. Returns a
@@ -1073,6 +1109,8 @@ class AD9361:
         r["rf_dc"] = self.rf_dc_offset_calib(rx_freq_hz)
         r["tx_quad"] = self.tx_quad_calib(rx_bb, tx_bb, clkrf_hz=clkrf_hz,
                                            clktf_hz=clktf_hz)
+        if tracking:
+            self.tracking_control(True, True, True)
         return r
 
     # -- ENSM / gain -------------------------------------------------------
