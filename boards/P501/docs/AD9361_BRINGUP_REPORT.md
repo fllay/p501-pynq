@@ -339,6 +339,7 @@ table), `0x016` calibration control (self-clearing bits).
 | `ad9361_driver.py` | register-level AD9361 driver (clock chain, LOs, FIR loader, `analog_init`, calibrations, gain/attenuation) |
 | `axi_dmac.py` | `axi_dmac` (not Xilinx `axi_dma`) driver |
 | `ad9361_full_bypass_test.py` | `axi_ad9361_core_enable(..., dac_datarate=1)` and register constants |
+| `P501_AD9361_Test.ipynb` | **start here**: notebook with bring-up, tone/spectrum plots, tone sweep, TX-attenuator check, PASS/FAIL summary |
 | `ad9361_rx_analog_test.py` | standard 3.84 MSPS bring-up + tone test |
 | `ad9361_rate_test.py [3.84\|30.72\|61.44]` | presets per rate, `settle()`; `NO_SETTLE=1` disables it |
 | `ad9361_rate_delay_sweep.py` | live LVDS delay-window sweep |

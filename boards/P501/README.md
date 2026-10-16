@@ -60,6 +60,13 @@ Not yet done: RX/TX quadrature calibration (distinct from the DC-offset
 calibration above, which *was* tried), AGC, full 2T2R mode (this project
 has only exercised R1/single-channel mode).
 
+## Quick operation test (notebook)
+
+`notebooks/P501_AD9361_Test.ipynb` (in `/home/xilinx/jupyter_notebooks/` on the board) brings up the AD9361 and checks TX1 -> RX1 end to end
+in about a minute: chip identity, PLL lock/FDD, calibrations, one tone with time-domain and spectrum plots, a -1.5 ... +1.5 MHz tone
+sweep (frequency and sign), and TX attenuator linearity, ending with a PASS/FAIL summary. Needs the TX1/RX1 antennas near each other
+(or a cable with at least 40 dB attenuation). The copy in the repository is saved with its outputs from a real run.
+
 ## USB networking (usb0 gadget)
 
 The board shows up on the host as a USB-Ethernet adapter (CDC-ECM, `usb-gadget-ecm`) and configures its side automatically
