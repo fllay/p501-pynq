@@ -20,6 +20,7 @@ both handled by AD9361.__init__ (same sequence as ad9361_spi_test.py).
 
 Reference clock: 40MHz 0.5ppm VCXO (P401/P501 user manual section 2.18.3).
 """
+import math
 import os
 import time
 
@@ -94,6 +95,35 @@ FIR_NUM_TAPS = lambda x: (x & 0x7) << 5
 FIR_IS_RX = 0x80
 FIR_TX1 = 0x01
 FIR_RX1 = 0x81
+
+REG_RX_MIX_GM_CONFIG = 0x1C0
+REG_RX_MIX_LO_CM = 0x1D5
+REG_RX_TIA_CONFIG = 0x1DB
+REG_TIA1_C_LSB = 0x1DC
+REG_TIA1_C_MSB = 0x1DD
+REG_TIA2_C_LSB = 0x1DE
+REG_TIA2_C_MSB = 0x1DF
+REG_RX1_TUNE_CTRL = 0x1E2
+REG_RX2_TUNE_CTRL = 0x1E3
+REG_RX_BBF_R2346 = 0x1E6
+REG_RX_BBF_C3_MSB = 0x1EB
+REG_RX_BBF_C3_LSB = 0x1EC
+REG_RX_BBF_TUNE_DIVIDE = 0x1F8
+REG_RX_BBF_TUNE_CONFIG = 0x1F9
+REG_RX_BBBW_MHZ = 0x1FB
+REG_RX_BBBW_KHZ = 0x1FC
+REG_CALIBRATION_CTRL = 0x016
+REG_INPUT_SELECT = 0x004
+TX_OUTPUT = 1 << 6
+REG_AGC_CONFIG_1 = 0x0FA
+DEC_PWR_FOR_LOW_PWR = 1 << 7
+DEC_PWR_FOR_LOCK_LEVEL = 1 << 6
+DEC_PWR_FOR_GAIN_LOCK_EXIT = 1 << 5
+REG_RX1_MANUAL_DIGITALFORCED_GAIN = 0x10B
+REG_RX2_MANUAL_DIGITALFORCED_GAIN = 0x10E
+RX_BB_TUNE_CAL = 1 << 7
+RX_TUNE_RESAMPLE = 1 << 1
+RX_PD_TUNE = 1 << 0
 
 TX_RX_VCO_OFFSET = REG_TX_VCO_OUTPUT - REG_RX_VCO_OUTPUT  # applies to the
 # whole REG_RX_* block above -- TX uses the same offset relative to each one
@@ -199,6 +229,46 @@ SYNTH_LUT_TDD_40MHZ = [
     (6083, 6, 2, 7, 3, 15, 13, 56, 12, 15, 12, 4, 13),
     (6040, 6, 2, 7, 3, 15, 13, 57, 12, 15, 12, 4, 13),
     (5997, 6, 2, 7, 3, 15, 13, 58, 12, 15, 12, 4, 13),
+]
+
+
+REG_MAX_LMT_FULL_GAIN = 0x0FD
+REG_AGC_CONFIG_2 = 0x0FB
+AGC_USE_FULL_GAIN_TABLE = 1 << 3
+REG_GAIN_TABLE_ADDRESS = 0x130
+REG_GAIN_TABLE_WRITE_DATA1 = 0x131
+REG_GAIN_TABLE_WRITE_DATA2 = 0x132
+REG_GAIN_TABLE_WRITE_DATA3 = 0x133
+REG_GAIN_TABLE_READ_DATA1 = 0x134
+REG_GAIN_TABLE_CONFIG = 0x137
+WRITE_GAIN_TABLE = 1 << 2
+START_GAIN_TABLE_CLOCK = 1 << 1
+GT_RX1 = 1
+GT_RX2 = 2
+
+# RX gain table for 200-1300 MHz (full table), from the vendor kernel driver
+# (ad9361.c full_gain_table[TBL_200_1300_MHZ]): (LNA/mixer, TIA/LPF, DC-cal/dig-gain)
+RX_GAIN_TABLE_200_1300MHZ = [
+    (0x00, 0x00, 0x20), (0x00, 0x00, 0x00), (0x00, 0x00, 0x00), (0x00, 0x01, 0x00),
+    (0x00, 0x02, 0x00), (0x00, 0x03, 0x00), (0x00, 0x04, 0x00), (0x00, 0x05, 0x00),
+    (0x01, 0x03, 0x20), (0x01, 0x04, 0x00), (0x01, 0x05, 0x00), (0x01, 0x06, 0x00),
+    (0x01, 0x07, 0x00), (0x01, 0x08, 0x00), (0x01, 0x09, 0x00), (0x01, 0x0A, 0x00),
+    (0x01, 0x0B, 0x00), (0x01, 0x0C, 0x00), (0x01, 0x0D, 0x00), (0x01, 0x0E, 0x00),
+    (0x02, 0x09, 0x20), (0x02, 0x0A, 0x00), (0x02, 0x0B, 0x00), (0x02, 0x0C, 0x00),
+    (0x02, 0x0D, 0x00), (0x02, 0x0E, 0x00), (0x02, 0x0F, 0x00), (0x02, 0x10, 0x00),
+    (0x02, 0x2B, 0x20), (0x02, 0x2C, 0x00), (0x04, 0x28, 0x20), (0x04, 0x29, 0x00),
+    (0x04, 0x2A, 0x00), (0x04, 0x2B, 0x00), (0x24, 0x20, 0x20), (0x24, 0x21, 0x00),
+    (0x44, 0x20, 0x20), (0x44, 0x21, 0x00), (0x44, 0x22, 0x00), (0x44, 0x23, 0x00),
+    (0x44, 0x24, 0x00), (0x44, 0x25, 0x00), (0x44, 0x26, 0x00), (0x44, 0x27, 0x00),
+    (0x44, 0x28, 0x00), (0x44, 0x29, 0x00), (0x44, 0x2A, 0x00), (0x44, 0x2B, 0x00),
+    (0x44, 0x2C, 0x00), (0x44, 0x2D, 0x00), (0x44, 0x2E, 0x00), (0x44, 0x2F, 0x00),
+    (0x44, 0x30, 0x00), (0x44, 0x31, 0x00), (0x44, 0x32, 0x00), (0x64, 0x2E, 0x20),
+    (0x64, 0x2F, 0x00), (0x64, 0x30, 0x00), (0x64, 0x31, 0x00), (0x64, 0x32, 0x00),
+    (0x64, 0x33, 0x00), (0x64, 0x34, 0x00), (0x64, 0x35, 0x00), (0x64, 0x36, 0x00),
+    (0x64, 0x37, 0x00), (0x64, 0x38, 0x00), (0x65, 0x38, 0x20), (0x66, 0x38, 0x20),
+    (0x67, 0x38, 0x20), (0x68, 0x38, 0x20), (0x69, 0x38, 0x20), (0x6A, 0x38, 0x20),
+    (0x6B, 0x38, 0x20), (0x6C, 0x38, 0x20), (0x6D, 0x38, 0x20), (0x6E, 0x38, 0x20),
+    (0x6F, 0x38, 0x20),
 ]
 
 
@@ -482,6 +552,207 @@ class AD9361:
 
     def set_tx_lo_freq(self, freq_hz):
         return self.set_lo_freq(True, freq_hz)
+
+    # -- RX analog bring-up (port of ad9361_setup's RX analog section) -----
+    # Without these the RX ADC/baseband filter/TIA are left at power-on
+    # defaults and the ADC output is a constant word (found 2026-10-17: BIST
+    # PRBS reached the FPGA fine while normal RX data was a flat -1).
+    def rx_bb_analog_filter_calib(self, rx_bb_bw_hz, bbpll_hz):
+        """Port of ad9361_rx_bb_analog_filter_calib. rx_bb_bw_hz is the
+        single-sided baseband bandwidth (RF bandwidth / 2)."""
+        rx_bb_bw_hz = max(200_000, min(28_000_000, rx_bb_bw_hz))
+        target = 126906 * (rx_bb_bw_hz // 10000)
+        self.rxbbf_div = min(511, -(-bbpll_hz // target))  # DIV_ROUND_UP
+
+        self.reg_write(REG_RX_BBF_TUNE_DIVIDE, self.rxbbf_div & 0xFF)
+        self.reg_writef(REG_RX_BBF_TUNE_CONFIG, 1 << 0, self.rxbbf_div >> 8)
+        self.reg_write(REG_RX_BBBW_MHZ, rx_bb_bw_hz // 1_000_000)
+        tmp = div_round_closest((rx_bb_bw_hz % 1_000_000) * 128, 1_000_000)
+        self.reg_write(REG_RX_BBBW_KHZ, min(127, tmp))
+        self.reg_write(REG_RX_MIX_LO_CM, 0x3F)
+        self.reg_write(REG_RX_MIX_GM_CONFIG, 3)
+        self.reg_write(REG_RX1_TUNE_CTRL, RX_TUNE_RESAMPLE)
+        self.reg_write(REG_RX2_TUNE_CTRL, RX_TUNE_RESAMPLE)
+
+        self.reg_write(REG_CALIBRATION_CTRL, RX_BB_TUNE_CAL)
+        ok = self.check_cal_done(REG_CALIBRATION_CTRL, RX_BB_TUNE_CAL, 0)
+
+        self.reg_write(REG_RX1_TUNE_CTRL, RX_TUNE_RESAMPLE | RX_PD_TUNE)
+        self.reg_write(REG_RX2_TUNE_CTRL, RX_TUNE_RESAMPLE | RX_PD_TUNE)
+        return ok
+
+    def rx_tia_calib(self, bb_bw_hz):
+        """Port of ad9361_rx_tia_calib; relies on registers set implicitly
+        by rx_bb_analog_filter_calib."""
+        reg1eb = self.reg_read(REG_RX_BBF_C3_MSB)
+        reg1ec = self.reg_read(REG_RX_BBF_C3_LSB)
+        reg1e6 = self.reg_read(REG_RX_BBF_R2346)
+        bb_bw_hz = max(200_000, min(20_000_000, bb_bw_hz))
+
+        cbbf = reg1eb * 160 + reg1ec * 10 + 140
+        r2346 = 18300 * (reg1e6 & 0x7)
+        ctia_ff = (cbbf * r2346 * 560) // 3_500_000
+
+        if bb_bw_hz <= 3_000_000:
+            reg1db = 0xE0
+        elif bb_bw_hz <= 10_000_000:
+            reg1db = 0x60
+        else:
+            reg1db = 0x20
+
+        if ctia_ff > 2920:
+            reg1dc = reg1de = 0x40
+            temp = min(127, div_round_closest(ctia_ff - 400, 320))
+            reg1dd = reg1df = temp
+        else:
+            temp = (div_round_closest(ctia_ff - 400, 40) + 0x40) & 0xFF
+            reg1dc = reg1de = temp
+            reg1dd = reg1df = 0
+
+        self.reg_write(REG_RX_TIA_CONFIG, reg1db)
+        self.reg_write(REG_TIA1_C_LSB, reg1dc)
+        self.reg_write(REG_TIA1_C_MSB, reg1dd)
+        self.reg_write(REG_TIA2_C_LSB, reg1de)
+        self.reg_write(REG_TIA2_C_MSB, reg1df)
+
+    def rx_adc_setup(self, bbpll_hz, adc_clk_hz):
+        """Port of ad9361_rx_adc_setup: writes 40 ADC config registers
+        (0x200-0x227) derived from the BB filter calibration results.
+        C unsigned-wrap semantics are reproduced with u64()."""
+        M64 = (1 << 64) - 1
+
+        def u64(x):
+            return x & M64
+
+        c3_msb = self.reg_read(REG_RX_BBF_C3_MSB)
+        c3_lsb = self.reg_read(REG_RX_BBF_C3_LSB)
+        r2346 = self.reg_read(REG_RX_BBF_R2346)
+
+        bb_bw_hz = (bbpll_hz * 10000) // (126906 * self.rxbbf_div)
+        bb_bw_hz = max(200_000, min(28_000_000, bb_bw_hz))
+        scale_snr_1e3 = 1000 if adc_clk_hz < 80_000_000 else 1585
+
+        if bb_bw_hz >= 18_000_000:
+            invrc = (160975 * r2346 * (160 * c3_msb + 10 * c3_lsb + 140) *
+                     bb_bw_hz * (1000 + (10 * (bb_bw_hz - 18_000_000) // 1_000_000)))
+            invrc //= 1000
+        else:
+            invrc = (160975 * r2346 * (160 * c3_msb + 10 * c3_lsb + 140) *
+                     bb_bw_hz)
+        invrc //= 1_000_000_000
+        assert invrc > 0, "invrc_tconst_1e6 == 0 (BB filter calibration failed?)"
+
+        sqrt_inv_rc_1e3 = math.isqrt(invrc)
+        maxsnr = 640 // 160
+        scaled_adc_clk_1e6 = div_round_closest(adc_clk_hz, 640)
+        inv_scaled_adc_clk_1e3 = div_round_closest(
+            640_000_000, div_round_closest(adc_clk_hz, 1000))
+        tmp_1e3 = div_round_closest(
+            980000 + 20 * max(1000, div_round_closest(inv_scaled_adc_clk_1e3, maxsnr)),
+            1000)
+        sqrt_term_1e3 = math.isqrt(scaled_adc_clk_1e6)
+        min_sqrt_term_1e3 = min(1000, math.isqrt(maxsnr * scaled_adc_clk_1e6))
+
+        d = [0] * 40
+        d[3] = 0x24
+        d[4] = 0x24
+        d[7] = min(124, u64(-50_000_000 + 8 * scale_snr_1e3 * sqrt_inv_rc_1e3 *
+                            min_sqrt_term_1e3) // 100_000_000)
+        t = (invrc >> 1) + 20 * inv_scaled_adc_clk_1e3 * d[7] // 80 * 1000
+        d[8] = min(255, t // invrc)
+        d[10] = min(127, u64(-500_000 + 77 * sqrt_inv_rc_1e3 *
+                             min_sqrt_term_1e3) // 1_000_000)
+        d[9] = min(127, (800 * d[10]) // 1000)
+        t = (invrc >> 1) + 20 * inv_scaled_adc_clk_1e3 * d[10] * 1000
+        d[11] = min(255, t // (invrc * 77))
+        d[12] = min(127, u64(-500_000 + 80 * sqrt_inv_rc_1e3 *
+                             min_sqrt_term_1e3) // 1_000_000)
+        t = u64(-3 * (invrc >> 1) + inv_scaled_adc_clk_1e3 * d[12] * (1000 * 20 // 80))
+        d[13] = min(255, t // invrc)
+        d[14] = (21 * (inv_scaled_adc_clk_1e3 // 10000)) & 0xFF
+        d[15] = min(127, (500 + 1025 * d[7]) // 1000)
+        d[16] = min(127, (d[15] * tmp_1e3) // 1000)
+        d[17] = d[15]
+        d[18] = min(127, (500 + 975 * d[10]) // 1000)
+        d[19] = min(127, (d[18] * tmp_1e3) // 1000)
+        d[20] = d[18]
+        d[21] = min(127, (500 + 975 * d[12]) // 1000)
+        d[22] = min(127, (d[21] * tmp_1e3) // 1000)
+        d[23] = d[21]
+        d[24] = 0x2E
+        d[25] = 128 + min(63000, div_round_closest(63 * scaled_adc_clk_1e6, 1000)) // 1000
+        d[26] = min(63, 63 * scaled_adc_clk_1e6 // 1_000_000 *
+                    (920 + 80 * inv_scaled_adc_clk_1e3 // 1000) // 1000)
+        d[27] = min(63, (32 * sqrt_term_1e3) // 1000)
+        d[28] = d[25]
+        d[29] = d[26]
+        d[30] = d[27]
+        d[31] = d[25]
+        d[32] = d[26]
+        d[33] = min(63, 63 * sqrt_term_1e3 // 1000)
+        d[34] = min(127, 64 * sqrt_term_1e3 // 1000)
+        d[35] = 0x40
+        d[36] = 0x40
+        d[37] = 0x2C
+        for i, v in enumerate(d):
+            self.reg_write(0x200 + i, v & 0xFF)
+        return d
+
+    def load_rx_gain_table(self, dest=GT_RX1 | GT_RX2):
+        """Port of ad9361_load_gt for the 200-1300 MHz full gain table.
+        Without it, manual gain indexes map to nothing (the chip's table RAM
+        is undefined at power-up). Valid manual-gain indexes are 0-76."""
+        tab = RX_GAIN_TABLE_200_1300MHZ
+        self.reg_writef(REG_AGC_CONFIG_2, AGC_USE_FULL_GAIN_TABLE, 1)
+        self.reg_write(REG_MAX_LMT_FULL_GAIN, len(tab) - 1)
+        sel = (dest & 0x3) << 3
+        self.reg_write(REG_GAIN_TABLE_CONFIG, START_GAIN_TABLE_CLOCK | sel)
+        for i, (d1, d2, d3) in enumerate(tab):
+            self.reg_write(REG_GAIN_TABLE_ADDRESS, i)
+            self.reg_write(REG_GAIN_TABLE_WRITE_DATA1, d1)
+            self.reg_write(REG_GAIN_TABLE_WRITE_DATA2, d2)
+            self.reg_write(REG_GAIN_TABLE_WRITE_DATA3, d3)
+            self.reg_write(REG_GAIN_TABLE_CONFIG,
+                           START_GAIN_TABLE_CLOCK | WRITE_GAIN_TABLE | sel)
+            self.reg_write(REG_GAIN_TABLE_READ_DATA1, 0)
+            self.reg_write(REG_GAIN_TABLE_READ_DATA1, 0)
+        self.reg_write(REG_GAIN_TABLE_CONFIG, START_GAIN_TABLE_CLOCK | sel)
+        self.reg_write(REG_GAIN_TABLE_READ_DATA1, 0)
+        self.reg_write(REG_GAIN_TABLE_READ_DATA1, 0)
+        self.reg_write(REG_GAIN_TABLE_CONFIG, 0)
+
+    def rf_port_setup(self, rx_input=0, tx_b=False):
+        """Port of ad9361_rf_port_setup (is_out=true path): REG_INPUT_SELECT
+        picks the RX input (0=A balanced, 1=B balanced, 2=C balanced, 3-8 =
+        single-ended A_N/A_P/B_N/B_P/C_N/C_P) and TX output A/B."""
+        assert 0 <= rx_input <= 8
+        val = (3 << (rx_input * 2)) if rx_input < 3 else (1 << (rx_input - 3))
+        if tx_b:
+            val |= TX_OUTPUT
+        self.reg_write(REG_INPUT_SELECT, val)
+
+    def gain_control_manual(self):
+        """Subset of ad9361_gc_setup: put RX1/RX2 in manual gain control
+        (RF_GAIN_MGC=0) with the vendor's default power-measurement bits,
+        and zero the digital-gain indexes."""
+        self.reg_write(REG_AGC_CONFIG_1,
+                       DEC_PWR_FOR_GAIN_LOCK_EXIT | DEC_PWR_FOR_LOCK_LEVEL |
+                       DEC_PWR_FOR_LOW_PWR)
+        self.reg_write(REG_RX1_MANUAL_DIGITALFORCED_GAIN, 0)
+        self.reg_write(REG_RX2_MANUAL_DIGITALFORCED_GAIN, 0)
+
+    def rx_analog_init(self, rf_bandwidth_hz=4_000_000, bbpll_hz=983_040_000,
+                       adc_clk_hz=61_440_000, rx_input=0):
+        """Run the RX analog bring-up in the vendor's order. Call after LO
+        lock, while ENSM is still in ALERT (before enable_fdd)."""
+        bb_bw = rf_bandwidth_hz // 2
+        self.rf_port_setup(rx_input)
+        self.gain_control_manual()
+        self.load_rx_gain_table()
+        ok = self.rx_bb_analog_filter_calib(bb_bw, bbpll_hz)
+        self.rx_tia_calib(bb_bw)
+        self.rx_adc_setup(bbpll_hz, adc_clk_hz)
+        return ok
 
     # -- ENSM / gain -------------------------------------------------------
     def enable_rx1_tx1(self):
