@@ -72,6 +72,8 @@ REG_TX_VCO_OUTPUT = 0x27A
 REG_TX_FRACT_BYTE_2 = 0x275
 REG_TX_CP_OVERRANGE_VCO_LOCK = 0x287
 REG_RFPLL_DIVIDERS = 0x005
+REG_TX_ATTEN_OFFSET = 0x077
+REG_TX2_DIG_ATTEN = 0x07C
 REG_REFERENCE_CLOCK_CYCLES = 0x03A
 
 # -- programmable FIR filter (128 taps max, RX decimation / TX
@@ -312,6 +314,32 @@ REG_TX_QUAD_LPF_GAIN = 0x0AE
 TX1_LO_CONV = 1 << 1
 TX1_SSB_CONV = 1 << 0
 
+REG_RX_CP_LEVEL_DETECT = 0x24B
+REG_RX_DSM_SETUP_1 = 0x24D
+REG_RX_LO_GEN_POWER_MODE = 0x261
+REG_RX_VCO_LDO = 0x248
+REG_RX_VCO_PD_OVERRIDES = 0x246
+REG_RX_CP_CURRENT_ = 0x23B
+REG_RX_CP_CONFIG = 0x23D
+REG_RX_VCO_CAL = 0x249
+REG_RX_CAL_STATUS = 0x244
+CP_OFFSET_OFF = 1 << 4
+CP_CAL_ENABLE = 1 << 2
+CP_CAL_VALID = 1 << 7
+VCO_CAL_EN = 1 << 7
+REG_GM_SUB_TABLE_ADDRESS = 0x138
+REG_GM_SUB_TABLE_GAIN_WRITE = 0x139
+REG_GM_SUB_TABLE_BIAS_WRITE = 0x13A
+REG_GM_SUB_TABLE_CTRL_WRITE = 0x13B
+REG_GM_SUB_TABLE_GAIN_READ = 0x13C
+REG_GM_SUB_TABLE_CONFIG = 0x13F
+WRITE_GM_SUB_TABLE = 1 << 2
+START_GM_SUB_TABLE_CLOCK = 1 << 1
+GM_ST_CTRL = [0x0, 0xD, 0x15, 0x1B, 0x21, 0x25, 0x29, 0x2C,
+              0x2F, 0x31, 0x33, 0x34, 0x35, 0x3A, 0x3D, 0x3E]
+GM_ST_GAIN = [0x78, 0x74, 0x70, 0x6C, 0x68, 0x64, 0x60, 0x5C,
+              0x58, 0x54, 0x50, 0x4C, 0x48, 0x30, 0x18, 0x0]
+
 def div_round_closest(a, b):
     return (a + b // 2) // b
 
@@ -485,7 +513,7 @@ class AD9361:
 
     # -- sample-rate clock chain -----------------------------------------
     def set_clock_chain(self, adc_div=16, r2_div=2, r1_div=2, clkrf_div=2,
-                         rx_fir_div=2, dac_div=16, t2_div=2, t1_div=2,
+                         rx_fir_div=2, dac_div=1, t2_div=2, t1_div=2,
                          clktf_div=2, tx_fir_div=2):
         """Direct register writes for each divider stage (no auto-search --
         caller picks known-good values). Defaults give BBPLL/16/2/2/2/2 =
@@ -500,11 +528,14 @@ class AD9361:
         self.reg_writef(REG_REF_DIVIDE_CONFIG_2, (1 << 7) | (0x3 << 2), 0)
 
         self.reg_writef(REG_BBPLL, 0x7, int(math.log2(adc_div)))
-        self.reg_writef(REG_BBPLL, 1 << 3, dac_div // 16 if dac_div in (1, 2) else 0)
-        # NOTE: DAC_CLK div is a single bit (1 or 2 only) per ad9361_set_clk_scaler;
-        # pass dac_div=1 or 2 only. Written explicitly below to avoid the
-        # confusing expression above:
-        self.reg_writef(REG_BBPLL, 1 << 3, 0 if dac_div == 1 else 1)
+        # DAC_CLK = ADC_CLK / dac_div, dac_div in {1, 2} (REG_BBPLL bit 3 =
+        # dac_div-1, per ad9361_set_clk_scaler). It must equal
+        # TX_SAMPL * tx_fir_div * clktf_div * t1_div * t2_div or the TX
+        # interpolation chain runs at the wrong rate (the old default of 2
+        # halved the DAC clock for the default 16x chain -> sideband comb,
+        # TX quad cal never converged).
+        assert dac_div in (1, 2), "dac_div must be 1 or 2"
+        self.reg_writef(REG_BBPLL, 1 << 3, dac_div - 1)
 
         # div=1 means "bypass the FIR stage entirely" (field value 0), NOT
         # "decimate by 2^0" (which would be field value 1, since the field
@@ -980,6 +1011,45 @@ class AD9361:
                                            rxnco_word, decim)
         return val
 
+    def synth_cp_calib(self, tx, ref_clk_hz=None):
+        """Port of ad9361_txrx_synth_cp_calib (FDD). Vendor order: run for
+        RX then TX BEFORE programming the corresponding LO frequency."""
+        ref_clk_hz = ref_clk_hz or self.ref_clk_hz
+        offs = 0x40 if tx else 0
+        self.reg_write(REG_RX_CP_LEVEL_DETECT + offs, 0x17)
+        self.reg_write(REG_RX_DSM_SETUP_1 + offs, 0x0)
+        self.reg_write(REG_RX_LO_GEN_POWER_MODE + offs, 0x00)
+        self.reg_write(REG_RX_VCO_LDO + offs, 0x0B)
+        self.reg_write(REG_RX_VCO_PD_OVERRIDES + offs, 0x02)
+        self.reg_write(REG_RX_CP_CURRENT_ + offs, 0x80)
+        self.reg_write(REG_RX_CP_CONFIG + offs, CP_OFFSET_OFF)
+        # FDD: VCO_CAL_COUNT(3) | FB_CLOCK_ADV(2)
+        self.reg_write(REG_RX_VCO_CAL + offs, VCO_CAL_EN | (3 << 2) | 2)
+        self.reg_write(REG_ENSM_CONFIG_2, DUAL_SYNTH_MODE)
+        self.reg_write(REG_ENSM_CONFIG_1, FORCE_ALERT_STATE | TO_ALERT)
+        self.reg_write(REG_ENSM_MODE, FDD_MODE)
+        self.reg_write(REG_RX_CP_CONFIG + offs, CP_OFFSET_OFF | CP_CAL_ENABLE)
+        return self.check_cal_done(REG_RX_CAL_STATUS + offs, CP_CAL_VALID, 1)
+
+    def load_mixer_gm_subtable(self):
+        """Port of ad9361_load_mixer_gm_subtable."""
+        self.reg_write(REG_GM_SUB_TABLE_CONFIG, START_GM_SUB_TABLE_CLOCK)
+        addr = len(GM_ST_CTRL)
+        for i in range(len(GM_ST_CTRL)):
+            addr -= 1
+            self.reg_write(REG_GM_SUB_TABLE_ADDRESS, addr)
+            self.reg_write(REG_GM_SUB_TABLE_BIAS_WRITE, 0)
+            self.reg_write(REG_GM_SUB_TABLE_GAIN_WRITE, GM_ST_GAIN[i])
+            self.reg_write(REG_GM_SUB_TABLE_CTRL_WRITE, GM_ST_CTRL[i])
+            self.reg_write(REG_GM_SUB_TABLE_CONFIG,
+                           WRITE_GM_SUB_TABLE | START_GM_SUB_TABLE_CLOCK)
+            self.reg_write(REG_GM_SUB_TABLE_GAIN_READ, 0)
+            self.reg_write(REG_GM_SUB_TABLE_GAIN_READ, 0)
+        self.reg_write(REG_GM_SUB_TABLE_CONFIG, START_GM_SUB_TABLE_CLOCK)
+        self.reg_write(REG_GM_SUB_TABLE_GAIN_READ, 0)
+        self.reg_write(REG_GM_SUB_TABLE_GAIN_READ, 0)
+        self.reg_write(REG_GM_SUB_TABLE_CONFIG, 0)
+
     def analog_init(self, rf_rx_bw_hz=4_000_000, rf_tx_bw_hz=4_000_000,
                     bbpll_hz=983_040_000, adc_clk_hz=61_440_000,
                     rx_freq_hz=700_000_000, rx_input=0):
@@ -989,6 +1059,7 @@ class AD9361:
         dict of per-step results."""
         rx_bb, tx_bb = rf_rx_bw_hz // 2, rf_tx_bw_hz // 2
         self.rf_port_setup(rx_input)
+        self.load_mixer_gm_subtable()
         self.gain_control_manual()
         self.load_rx_gain_table()
         r = {}
@@ -1040,8 +1111,14 @@ class AD9361:
         """REG_TX1_ATTEN_0/1: 0.25dB/LSB, 10-bit value split across two
         registers. atten_db in [0, 89.75]."""
         code = int(atten_db * 4) & 0x3FF
+        # Vendor ad9361_set_tx_atten: the new value only takes effect after
+        # the IMMEDIATELY_UPDATE_TPC_ATTEN latch (REG_TX2_DIG_ATTEN bit 6) is
+        # cleared before and set after the write.
+        self.reg_writef(REG_TX_ATTEN_OFFSET, 1 << 6, 0)   # MASK_CLR_ATTEN_UPDATE
+        self.reg_writef(REG_TX2_DIG_ATTEN, 1 << 6, 0)
         self.reg_write(REG_TX1_ATTEN_0, code & 0xFF)
         self.reg_writef(REG_TX1_ATTEN_1, 0x3, (code >> 8) & 0x3)
+        self.reg_writef(REG_TX2_DIG_ATTEN, 1 << 6, 1)
 
     # -- programmable FIR filter -------------------------------------------
     def load_fir_filter_coef(self, dest, gain_db, coef):

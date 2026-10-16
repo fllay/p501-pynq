@@ -16,8 +16,8 @@ from ad9361_fir_test import make_fir_coef
 SAMPLE_RATE = 3_840_000
 TONE_FREQ = 1_000_000
 N_SAMPLES = 8192
-TX_ATTEN_DB = 20
-RX_GAIN_INDEX = 40
+TX_ATTEN_DB = 30
+RX_GAIN_INDEX = 45
 
 
 def main():
@@ -27,14 +27,13 @@ def main():
         ad.power_up_clocks()
         assert ad.set_bbpll_rate(983_040_000), "BBPLL did not lock"
         ad.set_clock_chain()
+        print('synth CP cal RX/TX:', ad.synth_cp_calib(False), ad.synth_cp_calib(True))
         assert ad.set_rx_lo_freq(700_000_000), "RX LO did not lock"
         assert ad.set_tx_lo_freq(700_000_000), "TX LO did not lock"
 
-        res = ad.analog_init()
-        print(f"analog init: {res} (tx_quad 3 = LO leakage + sideband both converged), "
-              f"quad_phase={getattr(ad, 'last_tx_quad_cal_phase', None)}, "
-              f"rxbbf_div={ad.rxbbf_div}")
-
+        # vendor ad9361_setup() order: channel enables + digital port config
+        # happen BEFORE the calibrations
+        ad.enable_rx1_tx1()
         fb.axi_ad9361_core_enable(ol.axi_ad9361, num_channels=2)
         ad.reg_write(fb.REG_PARALLEL_PORT_CONF_1, fb.PP_CONF_1)
         ad.reg_write(fb.REG_PARALLEL_PORT_CONF_2, fb.PP_CONF_2)
@@ -42,7 +41,11 @@ def main():
         ad.reg_write(fb.REG_RX_CLOCK_DATA_DELAY, fb.RX_CLOCK_DATA_DELAY)
         ad.reg_write(fb.REG_TX_CLOCK_DATA_DELAY, fb.TX_CLOCK_DATA_DELAY)
         ad.reg_write(fb.REG_LVDS_BIAS_CTRL, fb.LVDS_BIAS_CTRL)
-        ad.enable_rx1_tx1()
+        res = ad.analog_init()
+        print(f"analog init: {res} (tx_quad 3 = LO leakage + sideband both converged), "
+              f"quad_phase={getattr(ad, 'last_tx_quad_cal_phase', None)}, "
+              f"rxbbf_div={ad.rxbbf_div}")
+
         ad.set_rx_manual_gain(RX_GAIN_INDEX)
         ad.set_tx_atten_db(TX_ATTEN_DB)
         ad.enable_fdd()
